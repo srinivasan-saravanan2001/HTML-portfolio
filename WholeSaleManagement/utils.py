@@ -1,0 +1,269 @@
+from datetime import datetime
+from typing import Optional, Any, Dict, List, Union
+from motor.motor_asyncio import AsyncIOMotorClient
+
+client = AsyncIOMotorClient("mongodb://localhost:27017/")
+db = client["Corporatecustomers"]
+
+
+def get_wholesale_collection():
+    return db["WholeSale"]
+
+
+def round_amount(value: Any) -> int:
+    if value is None:
+        return 0
+    try:
+        return int(round(float(value)))
+    except (ValueError, TypeError):
+        return 0
+
+
+def round_percentage(value: Any) -> float:
+    """Round percentage to 2 decimal places."""
+    if value is None:   
+        return 0.0
+    try:
+        return round(float(value), 2)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+# ✅ NEW — only addition to this file
+# def distribute_integer(total_int: int, weights: List[int]) -> List[int]:
+#     if not weights or total_int <= 0:
+#         return [0] * len(weights)
+
+#     total_weight = sum(weights)
+#     if total_weight <= 0:
+#         return [0] * len(weights)
+
+#     exact     = [(total_int * w / total_weight) for w in weights]
+#     floored   = [int(e) for e in exact]
+#     shortfall = total_int - sum(floored)
+
+#     # give 1 extra rupee to the indices with the largest remainders
+#     remainders = sorted(range(len(exact)), key=lambda i: -(exact[i] - floored[i]))
+#     for i in range(shortfall):
+#         floored[remainders[i]] += 1
+
+#     return floored
+
+
+
+def distribute_integer(total_int: int, weights: List[int]) -> List[int]:
+    """
+    Distribute total_int proportionally across weights using largest remainder method.
+    Handles both integer and float weights precisely.
+    """
+    if not weights or total_int <= 0:
+        return [0] * len(weights)
+
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        return [0] * len(weights)
+
+    # Calculate exact proportional distribution
+    exact = [total_int * w / total_weight for w in weights]
+    
+    # Floor each value
+    floored = [int(e) for e in exact]
+    
+    # Calculate shortfall
+    shortfall = total_int - sum(floored)
+    
+    # Get remainders (fractional parts) and sort indices by largest remainder
+    remainders = [(i, exact[i] - floored[i]) for i in range(len(exact))]
+    remainders.sort(key=lambda x: -x[1])  # Sort by remainder descending
+    
+    # Distribute the shortfall one by one to indices with largest remainders
+    for i in range(shortfall):
+        idx = remainders[i][0]
+        floored[idx] += 1
+    
+    return floored
+
+    
+
+def round_item_amounts(item: Dict) -> Dict:
+
+    if not item:
+        return item
+
+    rounded = dict(item)
+
+    # Financial amounts — round to integer
+    amount_fields = ["lineTotal", "netTotal", "variance_Defaultprice", "quantity"]
+    for field in amount_fields:
+        if field in rounded and rounded[field] is not None:
+            rounded[field] = round_amount(rounded[field])
+
+    # ✅ FIX: discountValue must round to 2dp BEFORE lineTotal/netTotal are computed
+    #         so per-unit discount arithmetic is precise.
+    if "discountValue" in rounded and rounded["discountValue"] is not None:
+        rounded["discountValue"] = round(float(rounded["discountValue"]), 2)
+
+    # Percentage fields — round to 2 decimal places
+    percentage_fields = ["discountPercentage", "tax"]
+    for field in percentage_fields:
+        if field in rounded and rounded[field] is not None:
+            rounded[field] = round_percentage(rounded[field])
+
+    # ✅ quantityKg keeps 2dp for gram precision (e.g. 1.25 kg)
+    if "quantityKg" in rounded and rounded["quantityKg"] is not None:
+        rounded["quantityKg"] = round(float(rounded["quantityKg"]), 2)
+
+    return rounded
+
+
+def round_order_amounts(data: Dict) -> Dict:
+    """Round all numeric fields in an order document."""
+    if not data:
+        return data
+
+    rounded = dict(data)
+
+    # Main order financial amounts — round to integer
+    order_amount_fields = [
+        "grossAmount",
+        "discountAmount",
+        "discountValue",
+        "totalAmount",
+        "paidAmount",
+        "pendingAmount",
+    ]
+    for field in order_amount_fields:
+        if field in rounded and rounded[field] is not None:
+            rounded[field] = round_amount(rounded[field])
+
+    # Percentage fields
+    percentage_fields = ["discountPercentage"]
+    for field in percentage_fields:
+        if field in rounded and rounded[field] is not None:
+            rounded[field] = round_percentage(rounded[field])
+
+    # Round items array
+    if "items" in rounded and isinstance(rounded["items"], list):
+        rounded["items"] = [round_item_amounts(i) for i in rounded["items"]]
+
+    return rounded
+
+
+def serialize_item(item: Dict) -> Dict:
+    if not item:
+        return {}
+
+    rounded = round_order_amounts(item)
+
+    if "_id" in rounded:
+        rounded["id"] = str(rounded["_id"])
+        del rounded["_id"]
+
+    datetime_fields = ["createdDate", "deliveryDate", "invoicedDate", "fullyPaidDate"]
+    for field in datetime_fields:
+        if field in rounded and isinstance(rounded[field], datetime):
+            rounded[field] = rounded[field].isoformat()
+
+    return rounded
+
+
+def get_financial_year(date=None):
+    if date is None:
+        date = datetime.now()
+    year = date.year
+    month = date.month
+    if month >= 4:
+        start_year = year % 100
+        end_year = (year + 1) % 100
+    else:
+        start_year = (year - 1) % 100
+        end_year = year % 100
+    return f"{start_year:02d}-{end_year:02d}"
+
+
+async def generate_invoice_no(collection):
+    now = datetime.now()
+    fy = get_financial_year(now)
+    prefix = f"33BM{fy}CP"
+
+    pipeline = [
+        {"$match": {"invoiceNo": {"$regex": f"^{prefix}\\d{{6}}$"}}},
+        {
+            "$project": {
+                "numericSuffix": {
+                    "$toInt": {"$substr": ["$invoiceNo", len(prefix), 6]}
+                }
+            }
+        },
+        {"$group": {"_id": None, "maxNum": {"$max": "$numericSuffix"}}},
+    ]
+
+    result = await collection.aggregate(pipeline).to_list(length=1)
+
+    if result and result[0].get("maxNum") is not None:
+        next_number = result[0]["maxNum"] + 1
+    else:
+        next_number = 1
+
+    return f"{prefix}{next_number:06d}"
+
+
+async def generate_order_id(collection):
+    now = datetime.now()
+    fy = get_financial_year(now)
+    prefix = f"33BM{fy}CPORD"
+
+    pipeline = [
+        {"$match": {"orderId": {"$regex": f"^{prefix}\\d{{6}}$"}}},
+        {
+            "$project": {
+                "numericSuffix": {
+                    "$toInt": {"$substr": ["$orderId", len(prefix), 6]}
+                }
+            }
+        },
+        {"$group": {"_id": None, "maxNum": {"$max": "$numericSuffix"}}},
+    ]
+
+    result = await collection.aggregate(pipeline).to_list(length=1)
+
+    if result and result[0].get("maxNum") is not None:
+        next_number = result[0]["maxNum"] + 1
+    else:
+        next_number = 1
+
+    return f"{prefix}{next_number:06d}"
+
+
+def calculate_amount_status(paid_amount: float, total_amount: float) -> str:
+
+    paid = round_amount(paid_amount)
+    total = round_amount(total_amount)
+
+    if paid <= 0:
+        return "pending"
+    elif paid < total:
+        return "partial"
+    else:
+        return "fully"
+
+
+def calculate_amount_status_with_date(
+    paid_amount: float, total_amount: float, current_status: Optional[str] = None
+) -> tuple:
+
+    paid = round_amount(paid_amount)
+    total = round_amount(total_amount)
+
+    if paid <= 0:
+        return "pending", False
+    elif paid < total:
+        return "partial", False
+    else:
+        if current_status != "fully":
+            return "fully", True
+        return "fully", False
+
+
+def format_currency(amount: float) -> str:
+    return f"₹{amount:,.2f}"
