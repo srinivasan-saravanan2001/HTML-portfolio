@@ -10,11 +10,6 @@ from reportlab.lib.units import inch
 from reportlab.platypus import Image as RLImage
 from typing import List, Dict, Any, Optional
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# COLOR CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
-
 colors_primary    = "#b43880"
 colors_secondary  = "#ad3c7a"
 colors_light_bg   = "#f8fafc"
@@ -22,18 +17,17 @@ colors_border     = "#d0d7de"
 colors_text_dark  = "#1e293b"
 colors_text_light = "#64748b"
 colors_white      = "#ffffff"
-colors_warning_bg = "#fff7ed"   # light orange tint for outstanding row
-colors_warning_fg = "#c2410c"   # dark orange text for outstanding row
+colors_warning_bg = "#fff7ed"  
+colors_warning_fg = "#c2410c"   
+colors_charge_bg  = "#f0fdf4"  
+colors_charge_fg  = "#166534"   
+colors_remark_bg  = "#eff6ff"   
+colors_remark_fg  = "#1e40af"  
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SHARED STYLE REGISTRY
-# ─────────────────────────────────────────────────────────────────────────────
 
 def get_pdf_styles():
     styles = getSampleStyleSheet()
 
-    # ── Order PDF Styles ──────────────────────────────────────────────────────
     styles.add(ParagraphStyle(
         name='OrdCompanyName', parent=styles['Heading1'],
         fontSize=20, textColor=colors.HexColor(colors_primary),
@@ -84,7 +78,6 @@ def get_pdf_styles():
         fontName='Helvetica-Bold', leading=12,
     ))
 
-    # ── Invoice PDF Styles ────────────────────────────────────────────────────
     styles.add(ParagraphStyle(
         name='InvCompanyName', parent=styles['Heading1'],
         fontSize=20, textColor=colors.HexColor(colors_primary),
@@ -148,8 +141,21 @@ def get_pdf_styles():
         fontSize=8, textColor=colors.HexColor(colors_text_dark),
         alignment=1, fontName='Helvetica-Bold', leading=10,
     ))
-
-    # ── Total label/value styles for order grand total block ──────────────────
+    styles.add(ParagraphStyle(
+        name='InvChargeLabel', parent=styles['Normal'],
+        fontSize=7, textColor=colors.HexColor(colors_charge_fg),
+        fontName='Helvetica-Bold', leading=9, alignment=2,  
+    ))
+    styles.add(ParagraphStyle(
+        name='InvChargeValue', parent=styles['Normal'],
+        fontSize=7, textColor=colors.HexColor(colors_charge_fg),
+        fontName='Helvetica-Bold', leading=9, alignment=2,   
+    ))
+    styles.add(ParagraphStyle(
+        name='InvRemarkText', parent=styles['Normal'],
+        fontSize=7, textColor=colors.HexColor(colors_remark_fg),
+        fontName='Helvetica', leading=9, alignment=0,      
+    ))
     styles.add(ParagraphStyle(
         name='TotalLabel', parent=styles['Normal'],
         fontSize=9, textColor=colors.HexColor(colors_text_dark),
@@ -170,7 +176,6 @@ def get_pdf_styles():
         fontSize=11, textColor=colors.HexColor(colors_primary),
         fontName='Helvetica-Bold', leading=13, alignment=2,
     ))
-    # ── Outstanding balance label/value (orange-tinted warning row) ───────────
     styles.add(ParagraphStyle(
         name='OutstandingLabel', parent=styles['Normal'],
         fontSize=9, textColor=colors.HexColor(colors_warning_fg),
@@ -182,7 +187,6 @@ def get_pdf_styles():
         fontName='Helvetica-Bold', leading=11, alignment=2,
     ))
 
-    # ── Ledger Styles ─────────────────────────────────────────────────────────
     styles.add(ParagraphStyle(
         name='CompanyName', parent=styles['Heading1'],
         fontSize=16, textColor=colors.HexColor(colors_primary),
@@ -196,9 +200,6 @@ def get_pdf_styles():
     return styles
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# COMPANY DETAILS (async — called from FastAPI routes)
-# ─────────────────────────────────────────────────────────────────────────────
 
 async def get_company_details() -> dict:
     url = "https://yenerp.com/purchaseapi/pobusiness/"
@@ -220,10 +221,6 @@ async def get_company_details() -> dict:
         print(f"Warning: Failed to fetch company details: {e}")
     return {"name": "Company", "address1": "", "address2": "", "phone": "", "gst": "", "logo_url": None}
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# INTERNAL HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _safe_text(value, default: str = "N/A") -> str:
     return str(value) if value is not None else default
@@ -261,11 +258,6 @@ def _separator_line(available_width: float) -> Table:
     ]))
     return line
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# OUTSTANDING BALANCE ROW BUILDER  (Top Right Position)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _build_outstanding_row(
     previous_outstanding: float,
     spacer_w: float,
@@ -273,10 +265,7 @@ def _build_outstanding_row(
     VALUE_W: float,
     styles,
 ) -> Optional[Table]:
-    """
-    Returns a small Table with a single highlighted row showing the
-    company's total outstanding balance, or None if balance is 0.
-    """
+
     if previous_outstanding <= 0:
         return None
 
@@ -299,9 +288,22 @@ def _build_outstanding_row(
     return row
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ORDER PDF
-# ─────────────────────────────────────────────────────────────────────────────
+def _item_display_name(item: dict, styles) -> Paragraph:
+    variance_name = _safe_text(item.get("varianceName"), "")
+    item_name     = item.get("itemName") or ""
+
+    if item_name:
+        text = (
+            f'<font size="5" color="{colors_text_light}"><b>{item_name}</b></font>'
+            f'<br/>'
+            f'<font size="7" color="{colors_text_dark}">{variance_name}</font>'
+        )
+    else:
+        text = f'<font size="7" color="{colors_text_dark}">{variance_name}</font>'
+
+    return Paragraph(text, styles["OrdTableCell"])
+
+
 
 def build_order_pdf(
     item: dict,
@@ -318,7 +320,6 @@ def build_order_pdf(
     available_width = A4[0] - doc.leftMargin - doc.rightMargin
     ci = company_info or {}
 
-    # ── Company Header ───────────────────────────────────────────────────────
     logo_img = _load_logo(ci.get("logo_url"))
     full_address = ", ".join(
         [p for p in [ci.get("address1", "").strip(), ci.get("address2", "").strip()] if p]
@@ -340,7 +341,6 @@ def build_order_pdf(
 
     story.append(header_table)
 
-    # ── Separator Line ───────────────────────────────────────────────────────
     line = Table([[""]], colWidths=[available_width])
     line.setStyle(TableStyle([
         ("LINEABOVE",     (0, 0), (-1, 0), 2, colors.HexColor(colors_primary)),
@@ -350,11 +350,9 @@ def build_order_pdf(
     story.append(line)
     story.append(Spacer(1, 0.02 * inch))
 
-    # ── Title ─────────────────────────────────────────────────────────────────
+
     story.append(Paragraph("ORDER CONFIRMATION", styles["InvDocTitle"]))
     story.append(Spacer(1, 0.1 * inch))
-
-    # ── Info block ────────────────────────────────────────────────────────────
     order_id = item.get("orderId", item.get("id", "N/A"))
     info_data = [
         [
@@ -395,8 +393,6 @@ def build_order_pdf(
     ]))
     story.append(info_table)
     story.append(Spacer(1, 0.15 * inch))
-
-    # ── Outstanding Amount Box (Top Right) ────────────────────────────────────
     LABEL_W = 110
     VALUE_W = 105
     TOTAL_W = LABEL_W + VALUE_W
@@ -408,8 +404,6 @@ def build_order_pdf(
     if outstanding_row:
         story.append(outstanding_row)
         story.append(Spacer(1, 0.15 * inch))
-
-    # ── Items table ───────────────────────────────────────────────────────────
     col_widths = [30, 250, 50, 40, 40, 35, 40, 50]
 
     items_data = [[
@@ -418,8 +412,7 @@ def build_order_pdf(
     ]]
 
     for i, si in enumerate(item.get("items", [])):
-        name = _safe_text(si.get("varianceName"), "")
-        if len(name) > 45: name = name[:42] + "..."
+
 
         qty_val = si.get("quantityKg")
 
@@ -440,7 +433,7 @@ def build_order_pdf(
 
         rows_data = [
             Paragraph(str(i + 1), styles["OrdTableCellCenter"]),
-            Paragraph(name, styles["OrdTableCell"]),
+            _item_display_name(si, styles),  
             Paragraph(qty_str, styles["OrdTableCellCenter"]),
             Paragraph(_safe_text(si.get("variance_Uom"), "-"), styles["OrdTableCellCenter"]),
             Paragraph(f"{price:.2f}", styles["OrdTableCellRight"]),
@@ -475,11 +468,11 @@ def build_order_pdf(
     ]))
     story.append(items_table)
     story.append(Spacer(1, 0.1 * inch))
-
-    # ── Grand total block ─────────────────────────────────────────────────────
     total_amount    = item.get("totalAmount", 0)
     gross_amount    = item.get("grossAmount", 0)
     discount_amount = item.get("discountAmount", 0)
+
+    charge_amount = item.get("chargeAmount", 0) or 0
 
     totals_rows = []
     style_cmds = [
@@ -510,6 +503,14 @@ def build_order_pdf(
         ])
         row_idx += 1
 
+    if charge_amount > 0:
+        totals_rows.append([
+            "",
+            Paragraph("CUSTOM CHARGE:", styles["TotalLabel"]),
+            Paragraph(f"+ Rs. {charge_amount:.2f}", styles["TotalValue"]),
+        ])
+        row_idx += 1
+
     grand_row_idx = row_idx
     totals_rows.append([
         "",
@@ -519,7 +520,6 @@ def build_order_pdf(
 
     style_cmds.extend([
         ("LINEABOVE",   (1, grand_row_idx), (2, grand_row_idx), 1.5, colors.HexColor(colors_primary)),
-        ("BACKGROUND",  (1, grand_row_idx), (2, grand_row_idx), colors.HexColor(colors_light_bg)),
     ])
 
     grand_total_table = Table(
@@ -536,9 +536,6 @@ def build_order_pdf(
     return pdf_bytes
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# INVOICE PDF
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _build_invoice_pdf(
     items: list,
@@ -555,8 +552,6 @@ def _build_invoice_pdf(
     story  = []
     available_width = A4[0] - doc.leftMargin - doc.rightMargin
     ci = company_info or {}
-
-    # ── Company Header ───────────────────────────────────────────────────────
     logo_img = _load_logo(ci.get("logo_url"))
     full_address = ", ".join(
         [p for p in [ci.get("address1", "").strip(), ci.get("address2", "").strip()] if p]
@@ -577,8 +572,6 @@ def _build_invoice_pdf(
         header_table = Table([[details_table]], colWidths=[available_width])
 
     story.append(header_table)
-
-    # ── Separator Line ───────────────────────────────────────────────────────
     line = Table([[""]], colWidths=[available_width])
     line.setStyle(TableStyle([
         ("LINEABOVE",     (0, 0), (-1, 0), 2, colors.HexColor(colors_primary)),
@@ -587,8 +580,6 @@ def _build_invoice_pdf(
     ]))
     story.append(line)
     story.append(Spacer(1, 0.02 * inch))
-
-    # ── Title + payment status ────────────────────────────────────────────────
     if amount_status:
         status_label = {"fully": "FULLY PAID", "partial": "PARTIALLY PAID", "pending": "PENDING"}.get(amount_status, amount_status.upper())
         title_data = [[Paragraph("INVOICE", styles["InvDocTitle"]), Paragraph(f"({status_label})", styles["InvStatusText"])]]
@@ -598,8 +589,6 @@ def _build_invoice_pdf(
     else:
         story.append(Paragraph("INVOICE", styles["InvDocTitle"]))
     story.append(Spacer(1, 0.1 * inch))
-
-    # ── Info block ────────────────────────────────────────────────────────────
     first_item = items[0]
     info_data = [
         [Paragraph("INVOICE NO", styles["InvInfoLabel"]), Paragraph(invoice_no, styles["InvInfoValue"]), Paragraph("INVOICE DATE", styles["InvInfoLabel"]), Paragraph(datetime.now().strftime("%d-%m-%Y"), styles["InvInfoValue"])],
@@ -614,9 +603,6 @@ def _build_invoice_pdf(
     ]))
     story.append(info_table)
     story.append(Spacer(1, 0.15 * inch))
-
-    # ── Outstanding Amount Box (Top Right) ────────────────────────────────────
-    # Using specific widths for alignment with Order PDF layout
     LABEL_W = 110
     VALUE_W = 105
     TOTAL_W = LABEL_W + VALUE_W
@@ -629,55 +615,52 @@ def _build_invoice_pdf(
         story.append(outstanding_row)
         story.append(Spacer(1, 0.15 * inch))
 
-    # ── Items table ───────────────────────────────────────────────────────────
-    col_widths = [60, 50, 155, 28, 28, 45, 35, 42, 34, 68]
+    col_widths = [60,     50,    155,    28,    28,    45,     35,      42,       34,    68]
 
     items_data = [[
         Paragraph(h, styles["InvTableHeader"])
         for h in ["ORDER ID", "DATE", "ITEM", "QTY", "UOM", "PRICE", "DISC %", "DISC VAL", "TAX", "TOTAL"]
     ]]
 
+    special_rows: List[tuple] = []
     tax_summary: Dict[float, Dict[str, float]] = {}
     sum_gross = 0.0
     sum_discount_amount = 0.0
     sum_total_amount = 0.0
+    sum_charge_amount = 0.0
+
+    EMPTY = Paragraph("", styles["InvTableCell"])
 
     for inv in items:
-        order_id = inv.get("orderId", "N/A")
-        inv_date = _fmt_date(inv.get("createdDate"))
-        order_gross = inv.get("grossAmount", 0) or 0
+        order_id   = inv.get("orderId", "N/A")
+        inv_date   = _fmt_date(inv.get("createdDate"))
+        order_gross          = inv.get("grossAmount", 0) or 0
         order_discount_amount = inv.get("discountAmount", 0) or 0
-        order_total_amount = inv.get("totalAmount", 0) or 0
+        order_total_amount   = inv.get("totalAmount", 0) or 0
+        order_charge_amount  = inv.get("chargeAmount", 0) or 0
 
         if order_gross == 0:
             for itm in inv.get("items", []):
                 order_gross += itm.get("lineTotal", 0)
 
-        sum_gross += order_gross
-        sum_discount_amount += order_discount_amount
-        sum_total_amount += order_total_amount
-
+        sum_gross            += order_gross
+        sum_discount_amount  += order_discount_amount
+        sum_total_amount     += order_total_amount
+        sum_charge_amount    += order_charge_amount
         for i, sel_item in enumerate(inv.get("items", [])):
             tax_rate   = sel_item.get("tax", 0)
-            item_name  = _safe_text(sel_item.get("varianceName"), "")
-            if len(item_name) > 35: item_name = item_name[:32] + "..."
-
             qty_val = sel_item.get("quantityKg")
-
-            qty_display = "0"
             if qty_val is not None and qty_val > 0:
-                kg_part = int(qty_val)
-                gm_decimal = qty_val - kg_part
-                gm_part = round(gm_decimal * 1000)
+                kg_part  = int(qty_val)
+                gm_part  = round((qty_val - kg_part) * 1000)
                 qty_display = f"{kg_part} Kg {gm_part} Gm"
             else:
                 qty_display = str(sel_item.get("quantity", 0))
 
             price      = sel_item.get("variance_Defaultprice", 0)
             line_total = sel_item.get("lineTotal", 0)
-
-            disc_pct = sel_item.get("discountPercentage", 0) or 0
-            disc_val = sel_item.get("discountValue", 0) or 0
+            disc_pct   = sel_item.get("discountPercentage", 0) or 0
+            disc_val   = sel_item.get("discountValue", 0) or 0
 
             if tax_rate > 0:
                 tax_amt = round(line_total * (tax_rate / 100), 2)
@@ -689,37 +672,85 @@ def _build_invoice_pdf(
                 tax_summary[tax_rate]["sgst"] += sgst
 
             tax_str = f"{int(tax_rate)}%" if tax_rate == int(tax_rate) else f"{tax_rate}%"
+
             row_vals = [
-                Paragraph(order_id,                styles["InvGroupHeader"]),
-                Paragraph(inv_date,                styles["InvTableCellCenter"]),
-                Paragraph(item_name,               styles["InvTableCell"]),
-                Paragraph(qty_display,             styles["InvTableCellCenter"]),
+                Paragraph(order_id,                 styles["InvGroupHeader"]),
+                Paragraph(inv_date,                 styles["InvTableCellCenter"]),
+                _item_display_name(sel_item, styles),   
+                Paragraph(qty_display,              styles["InvTableCellCenter"]),
                 Paragraph(_safe_text(sel_item.get("variance_Uom"), "-"), styles["InvTableCellCenter"]),
-                Paragraph(f"{price:.2f}",          styles["InvTableCellRight"]),
-                Paragraph(f"{disc_pct:.1f}%",      styles["InvTableCellCenter"]),
-                Paragraph(f"{disc_val:.2f}",       styles["InvTableCellRight"]),
-                Paragraph(tax_str,                 styles["InvTableCellCenter"]),
-                Paragraph(f"{line_total:.2f}",     styles["InvTableCellRight"]),
+                Paragraph(f"{price:.2f}",           styles["InvTableCellRight"]),
+                Paragraph(f"{disc_pct:.1f}%",       styles["InvTableCellCenter"]),
+                Paragraph(f"{disc_val:.2f}",        styles["InvTableCellRight"]),
+                Paragraph(tax_str,                  styles["InvTableCellCenter"]),
+                Paragraph(f"{line_total:.2f}",      styles["InvTableCellRight"]),
             ]
 
             if i == 0:
                 items_data.append(row_vals)
             else:
-                items_data.append([Paragraph("", styles["InvTableCell"]), Paragraph("", styles["InvTableCell"])] + row_vals[2:])
+                # subsequent items in same order: blank ORDER ID & DATE cols
+                items_data.append(
+                    [EMPTY, EMPTY] + row_vals[2:]
+                )
+
+
+        if order_charge_amount > 0:
+            charge_row_idx = len(items_data)
+            special_rows.append(("charge", charge_row_idx))
+            items_data.append([
+                EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY, EMPTY,
+                Paragraph("CUSTOM CHARGE:", styles["InvChargeLabel"]),
+                EMPTY,
+                Paragraph(f"+ Rs. {order_charge_amount:.2f}", styles["InvChargeValue"]),
+            ])
+
+        if inv is not items[-1]: 
+            sep_row_idx = len(items_data)
+            special_rows.append(("order_sep", sep_row_idx))
+            items_data.append([EMPTY] * 10)
+
+    base_style = [
+        ("BACKGROUND",    (0, 0), (-1, 0),  colors.HexColor(colors_primary)),
+        ("TEXTCOLOR",     (0, 0), (-1, 0),  colors.HexColor(colors_white)),
+        ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
+        ("FONTSIZE",      (0, 0), (-1, 0),  7),
+        ("ALIGN",         (0, 0), (-1, 0),  "CENTER"),
+        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID",          (0, 0), (-1, -1), 0.5, colors.HexColor(colors_border)),
+        ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
+        ("FONTSIZE",      (0, 1), (-1, -1), 7),
+        ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.HexColor(colors_white), colors.HexColor("#fafafa")]),
+        ("TOPPADDING",    (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]
+
+
+    for row_type, ridx in special_rows:
+        if row_type == "charge":
+
+            base_style += [
+                ("SPAN",          (7, ridx), (8, ridx)),
+                ("LINEABOVE",     (7, ridx), (9, ridx), 0.5, colors.HexColor(colors_charge_fg)),
+                ("FONTNAME",      (7, ridx), (9, ridx), "Helvetica-Bold"),
+                ("ALIGN",         (7, ridx), (9, ridx), "RIGHT"),
+                ("NOSPLIT",       (0, ridx), (-1, ridx)),
+                ("LINEBELOW",     (0, ridx), (6, ridx), 0,   colors.white),
+                ("LINEABOVE",     (0, ridx), (6, ridx), 0,   colors.white),
+            ]
+        elif row_type == "order_sep":
+            base_style += [
+                ("SPAN",          (0, ridx), (-1, ridx)),
+                ("LINEABOVE",     (0, ridx), (-1, ridx), 1.5, colors.HexColor(colors_primary)),
+                ("BACKGROUND",    (0, ridx), (-1, ridx), colors.HexColor(colors_light_bg)),
+                ("TOPPADDING",    (0, ridx), (-1, ridx), 1),
+                ("BOTTOMPADDING", (0, ridx), (-1, ridx), 1),
+            ]
 
     items_table = Table(items_data, colWidths=col_widths, repeatRows=1)
-    items_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor(colors_primary)), ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(colors_white)),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("FONTSIZE", (0, 0), (-1, 0), 7), ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor(colors_border)),
-        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"), ("FONTSIZE", (0, 1), (-1, -1), 7),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.HexColor(colors_white), colors.HexColor("#fafafa")]),
-        ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-    ]))
+    items_table.setStyle(TableStyle(base_style))
     story.append(items_table)
     story.append(Spacer(1, 0.1 * inch))
-
-    # ── Tax summary ───────────────────────────────────────────────────────────
     if tax_summary:
         tax_data = []
         for rate in sorted(tax_summary.keys()):
@@ -729,28 +760,47 @@ def _build_invoice_pdf(
         tax_table.setStyle(TableStyle([("ALIGN", (8, 0), (9, -1), "RIGHT"), ("FONTSIZE", (0, 0), (-1, -1), 8)]))
         story.append(tax_table)
         story.append(Spacer(1, 0.05 * inch))
-
-    # ── Grand total block ─────────────────────────────────────────────────────
     eff_paid    = paid_amount    if paid_amount    is not None else sum_total_amount
     eff_pending = pending_amount if pending_amount is not None else 0.0
     total_discount = sum_discount_amount if sum_discount_amount > 0 else 0.0
 
     totals_rows = [
-        ["", "", "", "", "", "", "", "", "GROSS TOTAL:", f"Rs. {sum_gross:.2f}"],
-        ["", "", "", "", "", "", "", "", "DISCOUNT AMOUNT:", f"- Rs. {total_discount:.2f}"],
-        ["", "", "", "", "", "", "", "", "GRAND TOTAL:", f"Rs. {sum_total_amount:.2f}"],
+        ["", "", "", "", "", "", "", "", "GROSS TOTAL:",    f"Rs. {sum_gross:.2f}"],
+        ["", "", "", "", "", "", "", "", "DISCOUNT:",       f"- Rs. {total_discount:.2f}"],
     ]
+    grand_row_idx = 2
+    if sum_charge_amount > 0:
+        totals_rows.append(
+            ["", "", "", "", "", "", "", "", "CUSTOM CHARGES:", f"+ Rs. {sum_charge_amount:.2f}"]
+        )
+        grand_row_idx += 1
+
+    totals_rows.append(
+        ["", "", "", "", "", "", "", "", "GRAND TOTAL:",    f"Rs. {sum_total_amount:.2f}"]
+    )
+
     if paid_amount is not None:
         totals_rows.append(["", "", "", "", "", "", "", "", "PAID AMOUNT:",    f"Rs. {eff_paid:.2f}"])
         totals_rows.append(["", "", "", "", "", "", "", "", "PENDING AMOUNT:", f"Rs. {eff_pending:.2f}"])
 
     style_cmds = [
-        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"), ("FONTSIZE", (0, 0), (-1, -1), 9), ("ALIGN", (8, 0), (9, -1), "RIGHT"),
-        ("LINEABOVE", (8, 0), (9, 0), 0.5, colors.HexColor(colors_border)), ("LINEABOVE", (8, 2), (9, 2), 1.5, colors.HexColor(colors_primary)),
-        ("FONTNAME", (8, 2), (9, 2), "Helvetica-Bold"), ("FONTSIZE", (8, 2), (9, 2), 11), ("TEXTCOLOR", (9, 2), (9, 2), colors.HexColor(colors_primary)),
-        ("BACKGROUND", (8, 2), (9, 2), colors.HexColor(colors_light_bg)),
+        ("FONTNAME",   (0, 0),             (-1, -1),             "Helvetica"),
+        ("FONTSIZE",   (0, 0),             (-1, -1),             9),
+        ("ALIGN",      (8, 0),             (9, -1),              "RIGHT"),
+        ("TOPPADDING", (0, 0),             (-1, -1),             3),
+        ("BOTTOMPADDING", (0, 0),          (-1, -1),             3),
+        ("LINEABOVE",  (8, 0),             (9, 0),               0.5, colors.HexColor(colors_border)),
+        *([
+            ("TEXTCOLOR",  (8, 2), (9, 2), colors.HexColor(colors_charge_fg)),
+            ("FONTNAME",   (8, 2), (9, 2), "Helvetica-Bold"),
+        ] if sum_charge_amount > 0 else []),
+        ("LINEABOVE",  (8, grand_row_idx), (9, grand_row_idx),   1.5, colors.HexColor(colors_primary)),
+        ("FONTNAME",   (8, grand_row_idx), (9, grand_row_idx),   "Helvetica-Bold"),
+        ("FONTSIZE",   (8, grand_row_idx), (9, grand_row_idx),   11),
+        ("TEXTCOLOR",  (9, grand_row_idx), (9, grand_row_idx),   colors.HexColor(colors_primary)),
     ]
-    if paid_amount is not None: style_cmds.append(("LINEABOVE", (8, 3), (9, 3), 0.5, colors.HexColor(colors_border)))
+    if paid_amount is not None:
+        style_cmds.append(("LINEABOVE", (8, grand_row_idx + 1), (9, grand_row_idx + 1), 0.5, colors.HexColor(colors_border)))
 
     grand_total_table = Table(totals_rows, colWidths=col_widths)
     grand_total_table.setStyle(TableStyle(style_cmds))
@@ -760,11 +810,6 @@ def _build_invoice_pdf(
     pdf_bytes = buffer.getvalue()
     buffer.close()
     return pdf_bytes
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# LEDGER PDF  — unchanged
-# ─────────────────────────────────────────────────────────────────────────────
 
 def build_ledger_pdf(
     company_name:    str,
@@ -788,7 +833,6 @@ def build_ledger_pdf(
     primary_color   = colors.HexColor(colors_primary)
     ci = company_info or {}
 
-    # ── Company Header ───────────────────────────────────────────────────────
     logo_img    = _load_logo(ci.get("logo_url"))
     full_address = ", ".join(
         [p for p in [ci.get("address1", "").strip(), ci.get("address2", "").strip()] if p]
@@ -819,7 +863,6 @@ def build_ledger_pdf(
         ),
     ))
 
-    # ── Ledger table ──────────────────────────────────────────────────────────
     header_style = ParagraphStyle(
         name="TableHeader", parent=styles["Normal"],
         fontSize=8, textColor=colors.white,
@@ -880,5 +923,3 @@ def build_ledger_pdf(
     doc.build(story)
     buffer.seek(0)
     return buffer
-
-

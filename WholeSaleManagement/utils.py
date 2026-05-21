@@ -5,10 +5,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 client = AsyncIOMotorClient("mongodb://localhost:27017/")
 db = client["Corporatecustomers"]
 
-
 def get_wholesale_collection():
     return db["WholeSale"]
-
 
 def round_amount(value: Any) -> int:
     if value is None:
@@ -17,10 +15,8 @@ def round_amount(value: Any) -> int:
         return int(round(float(value)))
     except (ValueError, TypeError):
         return 0
-
-
+    
 def round_percentage(value: Any) -> float:
-    """Round percentage to 2 decimal places."""
     if value is None:   
         return 0.0
     try:
@@ -28,55 +24,18 @@ def round_percentage(value: Any) -> float:
     except (ValueError, TypeError):
         return 0.0
 
-
-# ✅ NEW — only addition to this file
-# def distribute_integer(total_int: int, weights: List[int]) -> List[int]:
-#     if not weights or total_int <= 0:
-#         return [0] * len(weights)
-
-#     total_weight = sum(weights)
-#     if total_weight <= 0:
-#         return [0] * len(weights)
-
-#     exact     = [(total_int * w / total_weight) for w in weights]
-#     floored   = [int(e) for e in exact]
-#     shortfall = total_int - sum(floored)
-
-#     # give 1 extra rupee to the indices with the largest remainders
-#     remainders = sorted(range(len(exact)), key=lambda i: -(exact[i] - floored[i]))
-#     for i in range(shortfall):
-#         floored[remainders[i]] += 1
-
-#     return floored
-
-
-
 def distribute_integer(total_int: int, weights: List[int]) -> List[int]:
-    """
-    Distribute total_int proportionally across weights using largest remainder method.
-    Handles both integer and float weights precisely.
-    """
     if not weights or total_int <= 0:
         return [0] * len(weights)
 
     total_weight = sum(weights)
     if total_weight <= 0:
         return [0] * len(weights)
-
-    # Calculate exact proportional distribution
     exact = [total_int * w / total_weight for w in weights]
-    
-    # Floor each value
     floored = [int(e) for e in exact]
-    
-    # Calculate shortfall
     shortfall = total_int - sum(floored)
-    
-    # Get remainders (fractional parts) and sort indices by largest remainder
     remainders = [(i, exact[i] - floored[i]) for i in range(len(exact))]
-    remainders.sort(key=lambda x: -x[1])  # Sort by remainder descending
-    
-    # Distribute the shortfall one by one to indices with largest remainders
+    remainders.sort(key=lambda x: -x[1])  
     for i in range(shortfall):
         idx = remainders[i][0]
         floored[idx] += 1
@@ -89,27 +48,17 @@ def round_item_amounts(item: Dict) -> Dict:
 
     if not item:
         return item
-
     rounded = dict(item)
-
-    # Financial amounts — round to integer
     amount_fields = ["lineTotal", "netTotal", "variance_Defaultprice", "quantity"]
     for field in amount_fields:
         if field in rounded and rounded[field] is not None:
             rounded[field] = round_amount(rounded[field])
-
-    # ✅ FIX: discountValue must round to 2dp BEFORE lineTotal/netTotal are computed
-    #         so per-unit discount arithmetic is precise.
     if "discountValue" in rounded and rounded["discountValue"] is not None:
         rounded["discountValue"] = round(float(rounded["discountValue"]), 2)
-
-    # Percentage fields — round to 2 decimal places
     percentage_fields = ["discountPercentage", "tax"]
     for field in percentage_fields:
         if field in rounded and rounded[field] is not None:
             rounded[field] = round_percentage(rounded[field])
-
-    # ✅ quantityKg keeps 2dp for gram precision (e.g. 1.25 kg)
     if "quantityKg" in rounded and rounded["quantityKg"] is not None:
         rounded["quantityKg"] = round(float(rounded["quantityKg"]), 2)
 
@@ -117,13 +66,9 @@ def round_item_amounts(item: Dict) -> Dict:
 
 
 def round_order_amounts(data: Dict) -> Dict:
-    """Round all numeric fields in an order document."""
     if not data:
         return data
-
     rounded = dict(data)
-
-    # Main order financial amounts — round to integer
     order_amount_fields = [
         "grossAmount",
         "discountAmount",
@@ -135,35 +80,26 @@ def round_order_amounts(data: Dict) -> Dict:
     for field in order_amount_fields:
         if field in rounded and rounded[field] is not None:
             rounded[field] = round_amount(rounded[field])
-
-    # Percentage fields
     percentage_fields = ["discountPercentage"]
     for field in percentage_fields:
         if field in rounded and rounded[field] is not None:
             rounded[field] = round_percentage(rounded[field])
-
-    # Round items array
     if "items" in rounded and isinstance(rounded["items"], list):
         rounded["items"] = [round_item_amounts(i) for i in rounded["items"]]
-
     return rounded
 
 
 def serialize_item(item: Dict) -> Dict:
     if not item:
         return {}
-
     rounded = round_order_amounts(item)
-
     if "_id" in rounded:
         rounded["id"] = str(rounded["_id"])
         del rounded["_id"]
-
     datetime_fields = ["createdDate", "deliveryDate", "invoicedDate", "fullyPaidDate"]
     for field in datetime_fields:
         if field in rounded and isinstance(rounded[field], datetime):
             rounded[field] = rounded[field].isoformat()
-
     return rounded
 
 

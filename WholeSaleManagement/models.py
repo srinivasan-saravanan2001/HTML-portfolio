@@ -2,9 +2,9 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
-
 class SelectedItem(BaseModel):
     itemCode: str
+    itemName: Optional[str] = None   
     varianceName: str
     variance_Defaultprice: float
     variance_Uom: str
@@ -15,7 +15,8 @@ class SelectedItem(BaseModel):
     discountPercentage: Optional[float] = 0.0
     discountValue: Optional[float] = 0.0
     netTotal: Optional[float] = 0.0
-
+    chargeAmount: Optional[float] = 0.0
+    remarks: Optional[str] = None
 
 class WholeSaleTakeaway(BaseModel):
     id: Optional[str] = None
@@ -30,6 +31,8 @@ class WholeSaleTakeaway(BaseModel):
     discountValue: Optional[float] = 0.0
     discountAmount: Optional[float] = 0.0
     totalAmount: float
+    chargeAmount: Optional[float] = 0.0
+    remarks: Optional[str] = None
     paidAmount: float
     pendingAmount: float
     deliveryDate: datetime
@@ -43,7 +46,6 @@ class WholeSaleTakeaway(BaseModel):
     paymentMode: Optional[str] = None
     paymentHistory: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
 
-
 class WholeSaleTakeawayPost(BaseModel):
     orderId: Optional[str] = None
     companyId: str
@@ -55,11 +57,12 @@ class WholeSaleTakeawayPost(BaseModel):
     discountPercentage: Optional[float] = 0.0
     discountValue: Optional[float] = 0.0
     discountAmount: Optional[float] = 0.0
+    chargeAmount: Optional[float] = 0.0
+    remarks: Optional[str] = None
     totalAmount: float
     paidAmount: float
     deliveryDate: datetime
     paymentMode: Optional[str] = None
-
 
 class PaymentModeUpdate(BaseModel):
     payment_mode: str

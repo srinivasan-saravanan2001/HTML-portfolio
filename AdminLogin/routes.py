@@ -4,29 +4,21 @@ from fastapi.security import OAuth2PasswordBearer
 from .models import User, Token
 from .utils import authenticate_user, create_access_token, get_password_hash, users_collection
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# OAuth2 scheme for token validation
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
 @router.post("/create_user")
 async def create_user(user: User):
-    # Hash the password before storing it
     hashed_password = get_password_hash(user.password)
-
-    # Check if the user already exists
     existing_user = users_collection.find_one({"username": user.username})
     if existing_user:
         raise HTTPException(status_code=400, detail="User already exists")
-
-    # Insert new user into the database
     new_user = {"username": user.username, "hashed_password": hashed_password}
     users_collection.insert_one(new_user)
-
     return {"msg": "User created successfully"}
 
 @router.post("/", response_model=Token)

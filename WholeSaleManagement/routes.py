@@ -20,32 +20,26 @@ from .utils import (
     round_percentage,
     round_order_amounts,
     round_item_amounts,
-    distribute_integer,          # ✅ new import
+    distribute_integer,       
 )
 from .pdf_generator import get_company_details, _build_invoice_pdf, build_ledger_pdf, build_order_pdf
 
 router = APIRouter()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CREATE  — unchanged
-# ─────────────────────────────────────────────────────────────────────────────
-
 @router.post("/create", response_model=WholeSaleTakeaway)
 async def create_takeaway(item: WholeSaleTakeawayPost):
     collection = get_wholesale_collection()
     data = item.dict()
-
     data["grossAmount"]        = round_amount(data.get("grossAmount", 0))
     data["discountPercentage"] = round_percentage(data.get("discountPercentage", 0))
     data["discountAmount"]     = round_amount(data.get("discountAmount", 0))
     data["discountValue"]      = round_amount(data.get("discountValue", 0))
     data["totalAmount"]        = round_amount(data.get("totalAmount", 0))
     data["paidAmount"]         = round_amount(data.get("paidAmount", 0))
-
+    data["chargeAmount"]       = round_amount(data.get("chargeAmount", 0))
     if "items" in data and isinstance(data["items"], list):
         data["items"] = [round_item_amounts(i) for i in data["items"]]
-
     data["orderId"]       = await generate_order_id(collection)
     data["pendingAmount"] = round_amount(data["totalAmount"] - data["paidAmount"])
     data["createdDate"]   = datetime.utcnow()
@@ -56,16 +50,13 @@ async def create_takeaway(item: WholeSaleTakeawayPost):
     data["invoiceNo"]     = None
     data["amountStatus"]  = calculate_amount_status(data["paidAmount"], data["totalAmount"])
     data["paymentHistory"] = []
-
     result   = await collection.insert_one(data)
     new_item = await collection.find_one({"_id": result.inserted_id})
     return serialize_item(new_item)
+ 
+ 
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# GET ALL  — unchanged
-# ─────────────────────────────────────────────────────────────────────────────
-
+ 
 @router.get("/all", response_model=dict)
 async def get_all_takeaways(
     page: int = Query(1, ge=1),
@@ -81,17 +72,19 @@ async def get_all_takeaways(
     date_field: Optional[str] = Query("createdDate"),
     sort_by: Optional[str] = Query("createdDate"),
     sort_order: Optional[str] = Query("desc"),
+    items_page: int = Query(1, ge=1),
+    items_limit: int = Query(5, ge=1, le=100),
 ):
     collection = get_wholesale_collection()
     filter_query: Dict = {}
-
+ 
     if status:                  filter_query["status"] = status
     if company_status:          filter_query["companyStatus"] = company_status
     if amount_status:           filter_query["amountStatus"] = amount_status
     if exclude_company_status:  filter_query["companyStatus"] = {"$ne": exclude_company_status}
     if search:                  filter_query["companyName"] = {"$regex": search, "$options": "i"}
     if item:                    filter_query["items.varianceName"] = {"$regex": item, "$options": "i"}
-
+ 
     if start_date or end_date:
         date_filter: Dict = {}
         if start_date: date_filter["$gte"] = datetime.fromisoformat(start_date)
@@ -100,12 +93,12 @@ async def get_all_takeaways(
             end_datetime = end_datetime.replace(hour=23, minute=59, second=59, microsecond=999999)
             date_filter["$lte"] = end_datetime
         filter_query[date_field] = date_filter
-
+ 
     total_count    = await collection.count_documents(filter_query)
     skip           = (page - 1) * limit
     sort_direction = -1 if sort_order == "desc" else 1
     cursor         = collection.find(filter_query).sort(sort_by, sort_direction).skip(skip).limit(limit)
-
+ 
     items = []
     async for item_doc in cursor:
         item_doc["id"] = str(item_doc["_id"])
@@ -114,8 +107,19 @@ async def get_all_takeaways(
         for field in ["createdDate", "invoicedDate", "fullyPaidDate", "deliveryDate"]:
             if field in item_doc and isinstance(item_doc[field], datetime):
                 item_doc[field] = item_doc[field].isoformat()
+        all_items: list = item_doc.get("items", [])
+        items_total     = len(all_items)
+        items_skip      = (items_page - 1) * items_limit
+        sliced_items    = all_items[items_skip: items_skip + items_limit]
+        total_item_pages = (items_total + items_limit - 1) // items_limit if items_limit > 0 else 1
+ 
+        item_doc["items"]             = sliced_items
+        item_doc["items_total"]       = items_total
+        item_doc["items_page"]        = items_page
+        item_doc["items_limit"]       = items_limit
+        item_doc["items_total_pages"] = total_item_pages
         items.append(item_doc)
-
+ 
     return {
         "items": items,
         "total": total_count,
@@ -123,11 +127,44 @@ async def get_all_takeaways(
         "limit": limit,
         "total_pages": (total_count + limit - 1) // limit if limit > 0 else 0,
     }
+ 
+ 
 
+@router.get("/items-page/{item_id}", response_model=dict)
+async def get_order_items_page(
+    item_id: str,
+    items_page: int = Query(1, ge=1),
+    items_limit: int = Query(5, ge=1, le=100),
+):
+    collection = get_wholesale_collection()
+    if not ObjectId.is_valid(item_id):
+        raise HTTPException(status_code=400, detail="Invalid ID")
+ 
+    doc = await collection.find_one(
+        {"_id": ObjectId(item_id)},
+        {"items": 1} 
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Order not found")
+ 
+    all_items: list  = doc.get("items", [])
+    items_total      = len(all_items)
+    items_skip       = (items_page - 1) * items_limit
+    sliced           = all_items[items_skip: items_skip + items_limit]
+    total_pages      = (items_total + items_limit - 1) // items_limit if items_limit > 0 else 1
+    has_more         = (items_page * items_limit) < items_total
+ 
+    return {
+        "items":             sliced,
+        "items_total":       items_total,
+        "items_page":        items_page,
+        "items_limit":       items_limit,
+        "items_total_pages": total_pages,
+        "has_more":          has_more,
+    }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GET INVOICED  — unchanged
-# ─────────────────────────────────────────────────────────────────────────────
+ 
+
 
 @router.get("/invoiced", response_model=dict)
 async def get_invoiced_items(
@@ -139,24 +176,29 @@ async def get_invoiced_items(
     date_field: Optional[str] = Query("createdDate"),
     sort_by: Optional[str] = Query("createdDate"),
     sort_order: Optional[str] = Query("desc"),
+    order_page: int = Query(1, ge=1),
+    order_limit: int = Query(2, ge=1, le=50),
 ):
     collection = get_wholesale_collection()
 
     filter_query: Dict = {
         "companyStatus": "invoiced",
         "status": "active",
-        "amountStatus": {"$ne": "fully"},
     }
+
     if company_name:
         filter_query["companyName"] = company_name
 
     db_date_field = date_field
-    if date_field == "invoiceDate":  db_date_field = "createdDate"
-    elif date_field == "dueDate":    db_date_field = "deliveryDate"
+    if date_field == "invoiceDate":
+        db_date_field = "createdDate"
+    elif date_field == "dueDate":
+        db_date_field = "deliveryDate"
 
     if start_date or end_date:
         date_filter: Dict = {}
-        if start_date: date_filter["$gte"] = datetime.fromisoformat(start_date)
+        if start_date:
+            date_filter["$gte"] = datetime.fromisoformat(start_date)
         if end_date:
             end_datetime = datetime.fromisoformat(end_date)
             end_datetime = end_datetime.replace(hour=23, minute=59, second=59, microsecond=999999)
@@ -164,9 +206,12 @@ async def get_invoiced_items(
         filter_query[db_date_field] = date_filter
 
     db_sort_by = sort_by
-    if sort_by == "invoiceDate":    db_sort_by = "createdDate"
-    elif sort_by == "dueDate":      db_sort_by = "deliveryDate"
-    elif sort_by == "invoicedDate": db_sort_by = "invoicedDate"
+    if sort_by == "invoiceDate":
+        db_sort_by = "createdDate"
+    elif sort_by == "dueDate":
+        db_sort_by = "deliveryDate"
+    elif sort_by == "invoicedDate":
+        db_sort_by = "invoicedDate"
 
     sort_direction = -1 if sort_order == "desc" else 1
 
@@ -175,108 +220,134 @@ async def get_invoiced_items(
         {"$sort": {db_sort_by: sort_direction}},
         {
             "$group": {
-                "_id":                    "$invoiceNo",
-                "invoiceNo":              {"$first": "$invoiceNo"},
-                "companyName":            {"$first": "$companyName"},
-                "address":               {"$first": "$address"},
-                "phoneNumber":           {"$first": "$phoneNumber"},
-                "invoicedDate":          {"$first": "$invoicedDate"},
-                "createdDate":           {"$first": "$createdDate"},
-                "deliveryDate":          {"$first": "$deliveryDate"},
-                "paymentMode":           {"$first": "$paymentMode"},
-                "paymentHistoryArrays":  {"$push": "$paymentHistory"},
-                "totalAmount":           {"$sum": "$totalAmount"},
-                "paidAmount":            {"$sum": "$paidAmount"},
-                "pendingAmount":         {"$sum": "$pendingAmount"},
-                "grossAmount":           {"$sum": "$grossAmount"},
-                "discountAmount":        {"$sum": "$discountAmount"},
-                "orders": {"$push": {
-                    "id":             {"$toString": "$_id"},
-                    "orderId":        "$orderId",
-                    "items":          "$items",
-                    "totalAmount":    "$totalAmount",
-                    "paidAmount":     "$paidAmount",
-                    "pendingAmount":  "$pendingAmount",
-                    "grossAmount":    "$grossAmount",
-                    "discountAmount": "$discountAmount",
-                    "amountStatus":   "$amountStatus",
-                    "createdDate":    "$createdDate",
-                    "deliveryDate":   "$deliveryDate",
-                }},
+                "_id": "$invoiceNo",
+                "invoiceNo": {"$first": "$invoiceNo"},
+                "companyName": {"$first": "$companyName"},
+                "address": {"$first": "$address"},
+                "phoneNumber": {"$first": "$phoneNumber"},
+                "invoicedDate": {"$first": "$invoicedDate"},
+                "createdDate": {"$first": "$createdDate"},
+                "deliveryDate": {"$first": "$deliveryDate"},
+                "paymentMode": {"$first": "$paymentMode"},
+                "paymentHistoryArrays": {"$push": "$paymentHistory"},
+                "totalAmount": {"$sum": {"$ifNull": ["$totalAmount", 0]}},
+                "paidAmount": {"$sum": {"$ifNull": ["$paidAmount", 0]}},
+                "grossAmount": {"$sum": {"$ifNull": ["$grossAmount", 0]}},
+                "discountAmount": {"$sum": {"$ifNull": ["$discountAmount", 0]}},
+                "chargeAmount": {"$sum": {"$ifNull": ["$chargeAmount", 0]}},
+                "orders": {
+                    "$push": {
+                        "id": {"$toString": "$_id"},
+                        "orderId": "$orderId",
+                        "items": "$items",
+                        "totalAmount": "$totalAmount",
+                        "paidAmount": "$paidAmount",
+                        "pendingAmount": "$pendingAmount",
+                        "grossAmount": "$grossAmount",
+                        "discountAmount": "$discountAmount",
+                        "chargeAmount": "$chargeAmount",
+                        "remarks": "$remarks",
+                        "amountStatus": "$amountStatus",
+                        "createdDate": {
+                            "$dateToString": {
+                                "format": "%Y-%m-%dT%H:%M:%S",
+                                "date": {"$ifNull": ["$createdDate", datetime(1970, 1, 1)]}
+                            }
+                        },
+                        "deliveryDate": {
+                            "$dateToString": {
+                                "format": "%Y-%m-%dT%H:%M:%S",
+                                "date": {"$ifNull": ["$deliveryDate", datetime(1970, 1, 1)]}
+                            }
+                        },
+                    }
+                },
                 "amountStatus": {"$first": "$amountStatus"},
-                "id":           {"$first": {"$toString": "$_id"}},
+                "id": {"$first": {"$toString": "$_id"}},
             }
         },
+        {
+            "$addFields": {
+                "pendingAmount": {"$subtract": ["$totalAmount", "$paidAmount"]}
+            }
+        },
+        {"$match": {"pendingAmount": {"$gt": 0}}},
         {"$sort": {"invoiceNo": sort_direction}},
     ]
-
     count_pipeline = pipeline + [{"$count": "total"}]
-    count_result   = await collection.aggregate(count_pipeline).to_list(length=1)
-    total_count    = count_result[0]["total"] if count_result else 0
-
+    count_result = await collection.aggregate(count_pipeline).to_list(length=1)
+    total_count = count_result[0]["total"] if count_result else 0
     paged_pipeline = pipeline + [{"$skip": (page - 1) * limit}, {"$limit": limit}]
-    raw_groups     = await collection.aggregate(paged_pipeline).to_list(length=limit)
+    raw_groups = await collection.aggregate(paged_pipeline).to_list(length=limit)
 
     def iso(val):
-        if isinstance(val, datetime): return val.isoformat()
+        if isinstance(val, datetime):
+            return val.isoformat()
         return val or ""
 
     result_items = []
+
     for i, grp in enumerate(raw_groups):
-        total   = round_amount(grp.get("totalAmount", 0))
-        paid    = round_amount(grp.get("paidAmount", 0))
+        total = round_amount(grp.get("totalAmount", 0))
+        paid = round_amount(grp.get("paidAmount", 0))
         pending = round_amount(grp.get("pendingAmount", 0))
 
-        if paid <= 0:      amt_status = "Pending"
-        elif paid < total: amt_status = "Partial"
-        else:              amt_status = "Fully"
+        if paid <= 0:
+            amt_status = "Pending"
+        elif paid < total:
+            amt_status = "Partial"
+        else:
+            amt_status = "Fully"
 
         seen_keys: set = set()
         all_history: List = []
+
         for sub in grp.get("paymentHistoryArrays", []):
             entries = sub if isinstance(sub, list) else ([sub] if sub else [])
             for entry in entries:
                 if not isinstance(entry, dict):
                     continue
-                dedup_key = f"{entry.get('date')}_{entry.get('mode')}_{entry.get('amount')}"
-                if dedup_key in seen_keys:
+                key = f"{entry.get('date')}_{entry.get('mode')}_{entry.get('amount')}"
+                if key in seen_keys:
                     continue
-                seen_keys.add(dedup_key)
-                rounded_entry = dict(entry)
-                rounded_entry["amount"] = round_amount(entry.get("amount", 0))
-                all_history.append(rounded_entry)
+                seen_keys.add(key)
+                entry["amount"] = round_amount(entry.get("amount", 0))
+                all_history.append(entry)
+
         all_history.sort(key=lambda e: e.get("date", "") or "")
 
-        all_items = []
-        for order in grp.get("orders", []):
-            for it in order.get("items", []):
-                all_items.append(round_item_amounts(it))
+        all_orders = grp.get("orders", [])
+        total_orders = len(all_orders)
+        order_skip = (order_page - 1) * order_limit
+        paged_orders = all_orders[order_skip: order_skip + order_limit]
+        order_total_pages = (total_orders + order_limit - 1) // order_limit if order_limit > 0 else 1
 
         result_items.append({
-            "id":                grp.get("id"),
-            "sNo":               (page - 1) * limit + i + 1,
-            "invoiceNumber":     grp.get("invoiceNo", "N/A"),
-            "invoiceNo":         grp.get("invoiceNo", "N/A"),
-            "companyName":       grp.get("companyName", ""),
-            "address":           grp.get("address", ""),
-            "phoneNumber":       grp.get("phoneNumber", ""),
-            "items":             all_items,
-            "orders":            grp.get("orders", []),
-            "invoiceDate":       iso(grp.get("createdDate")),
-            "deliveryDate":      iso(grp.get("deliveryDate")),
-            "invoicedDate":      iso(grp.get("invoicedDate")),
-            "amount":            total,
-            "totalAmount":       total,
-            "paidAmount":        paid,
-            "pendingAmount":     pending,
-            "status":            amt_status,
-            "paymentMethod":     grp.get("paymentMode", ""),
-            "paymentHistory":    all_history,
-            "createdDate":       iso(grp.get("createdDate")),
-            "grossAmount":       round_amount(grp.get("grossAmount", 0)),
-            "discountPercentage": round_percentage(grp.get("discountPercentage", 0)),
-            "discountValue":     round_amount(grp.get("discountValue", 0)),
-            "discountAmount":    round_amount(grp.get("discountAmount", 0)),
+            "id": grp.get("id"),
+            "sNo": (page - 1) * limit + i + 1,
+            "invoiceNumber": grp.get("invoiceNo", "N/A"),
+            "invoiceNo": grp.get("invoiceNo", "N/A"),
+            "companyName": grp.get("companyName", ""),
+            "address": grp.get("address", ""),
+            "phoneNumber": grp.get("phoneNumber", ""),
+            "orders": paged_orders,
+            "orders_total": total_orders,
+            "orders_page": order_page,
+            "orders_limit": order_limit,
+            "orders_total_pages": order_total_pages,
+            "invoiceDate": iso(grp.get("createdDate")),
+            "deliveryDate": iso(grp.get("deliveryDate")),
+            "invoicedDate": iso(grp.get("invoicedDate")),
+            "totalAmount": total,
+            "paidAmount": paid,
+            "pendingAmount": pending,
+            "status": amt_status,
+            "paymentMethod": grp.get("paymentMode", ""),
+            "paymentHistory": all_history,
+            "createdDate": iso(grp.get("createdDate")),
+            "grossAmount": round_amount(grp.get("grossAmount", 0)),
+            "discountAmount": round_amount(grp.get("discountAmount", 0)),
+            "chargeAmount": round_amount(grp.get("chargeAmount", 0)),
         })
 
     return {
@@ -288,10 +359,9 @@ async def get_invoiced_items(
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GET FULLY PAID  — unchanged
-# ─────────────────────────────────────────────────────────────────────────────
 
+    
+ 
 @router.get("/fully-paid", response_model=dict)
 async def get_fully_paid_items(
     page: int = Query(1, ge=1),
@@ -302,16 +372,21 @@ async def get_fully_paid_items(
     date_field: Optional[str] = Query("fullyPaidDate"),
     sort_by: Optional[str] = Query("fullyPaidDate"),
     sort_order: Optional[str] = Query("desc"),
+    cursor: Optional[str] = Query(None),
+    order_page: int = Query(1, ge=1),
+    order_limit: int = Query(5, ge=1, le=50),
 ):
     collection = get_wholesale_collection()
 
-    filter_query: Dict = {"amountStatus": "fully", "status": "active"}
+    filter_query: Dict = {"status": "active", "companyStatus": "invoiced"}
+
     if company_name:
         filter_query["companyName"] = company_name
 
     if start_date or end_date:
         date_filter: Dict = {}
-        if start_date: date_filter["$gte"] = datetime.fromisoformat(start_date)
+        if start_date:
+            date_filter["$gte"] = datetime.fromisoformat(start_date)
         if end_date:
             end_datetime = datetime.fromisoformat(end_date)
             end_datetime = end_datetime.replace(hour=23, minute=59, second=59, microsecond=999999)
@@ -320,62 +395,111 @@ async def get_fully_paid_items(
 
     sort_direction = -1 if sort_order == "desc" else 1
 
+    is_scroll_mode = bool(cursor and ObjectId.is_valid(cursor))
+    if is_scroll_mode:
+        filter_query["_id"] = {"$lt": ObjectId(cursor)}
+
     pipeline = [
         {"$match": filter_query},
-        {"$sort": {sort_by: sort_direction}},
+        {"$sort": {"_id": sort_direction}},
+        *( [{"$limit": limit}] if is_scroll_mode else []),
         {
             "$group": {
-                "_id":                   "$invoiceNo",
-                "invoiceNo":             {"$first": "$invoiceNo"},
-                "companyName":           {"$first": "$companyName"},
-                "address":              {"$first": "$address"},
-                "phoneNumber":          {"$first": "$phoneNumber"},
-                "invoicedDate":         {"$first": "$invoicedDate"},
-                "createdDate":          {"$first": "$createdDate"},
-                "deliveryDate":         {"$first": "$deliveryDate"},
-                "fullyPaidDate":        {"$max": "$fullyPaidDate"},
-                "paymentMode":          {"$first": "$paymentMode"},
+                "_id": "$invoiceNo",
+                "invoiceNo": {"$first": "$invoiceNo"},
+                "companyName": {"$first": "$companyName"},
+                "address": {"$first": "$address"},
+                "phoneNumber": {"$first": "$phoneNumber"},
+                "invoicedDate": {"$first": "$invoicedDate"},
+                "createdDate": {"$first": "$createdDate"},
+                "deliveryDate": {"$first": "$deliveryDate"},
+                "fullyPaidDate": {"$max": "$fullyPaidDate"},
+                "paymentMode": {"$first": "$paymentMode"},
                 "paymentHistoryArrays": {"$push": "$paymentHistory"},
-                "totalAmount":          {"$sum": "$totalAmount"},
-                "paidAmount":           {"$sum": "$paidAmount"},
-                "pendingAmount":        {"$sum": "$pendingAmount"},
-                "companyStatus":        {"$first": "$companyStatus"},
-                "amountStatus":         {"$first": "$amountStatus"},
-                "grossAmount":          {"$first": "$grossAmount"},
-                "discountPercentage":   {"$first": "$discountPercentage"},
-                "discountValue":        {"$first": "$discountValue"},
-                "discountAmount":       {"$first": "$discountAmount"},
-                "orders": {"$push": {
-                    "id":             {"$toString": "$_id"},
-                    "orderId":        "$orderId",
-                    "items":          "$items",
-                    "totalAmount":    "$totalAmount",
-                    "paidAmount":     "$paidAmount",
-                    "pendingAmount":  "$pendingAmount",
-                    "createdDate":    "$createdDate",
-                    "deliveryDate":   "$deliveryDate",
-                    "grossAmount":    "$grossAmount",
-                    "discountAmount": "$discountAmount",
-                }},
+                "totalAmount": {"$sum": {"$ifNull": ["$totalAmount", 0]}},
+                "paidAmount": {"$sum": {"$ifNull": ["$paidAmount", 0]}},
+                "companyStatus": {"$first": "$companyStatus"},
+                "grossAmount": {"$sum": {"$ifNull": ["$grossAmount", 0]}},
+                "discountPercentage": {"$first": "$discountPercentage"},
+                "discountValue": {"$first": "$discountValue"},
+                "discountAmount": {"$sum": {"$ifNull": ["$discountAmount", 0]}},
+                "chargeAmount": {"$sum": {"$ifNull": ["$chargeAmount", 0]}},
+                "orders": {
+                    "$push": {
+                        "id": {"$toString": "$_id"},
+                        "orderId": "$orderId",
+                        "items": "$items",
+                        "totalAmount": "$totalAmount",
+                        "paidAmount": "$paidAmount",
+                        "pendingAmount": "$pendingAmount",
+                        "grossAmount": "$grossAmount",
+                        "discountAmount": "$discountAmount",
+                        "chargeAmount": "$chargeAmount",
+                        "remarks": "$remarks",
+                        "amountStatus": "$amountStatus",
+                        "createdDate": {
+                            "$dateToString": {
+                                "format": "%Y-%m-%dT%H:%M:%S",
+                                "date": {"$ifNull": ["$createdDate", datetime(1970, 1, 1)]}
+                            }
+                        },
+                        "deliveryDate": {
+                            "$dateToString": {
+                                "format": "%Y-%m-%dT%H:%M:%S",
+                                "date": {"$ifNull": ["$deliveryDate", datetime(1970, 1, 1)]}
+                            }
+                        },
+                    }
+                },
+                "last_id": {"$last": "$_id"},
                 "id": {"$first": {"$toString": "$_id"}},
             }
         },
-        {"$sort": {"invoiceNo": sort_direction}},
+        {
+            "$addFields": {
+                "pendingAmount": {"$subtract": ["$totalAmount", "$paidAmount"]},
+                "invoice_amount_status": {
+                    "$switch": {
+                        "branches": [
+                            {"case": {"$eq": ["$paidAmount", 0]}, "then": "pending"},
+                            {"case": {"$lt": ["$paidAmount", "$totalAmount"]}, "then": "partial"},
+                        ],
+                        "default": "fully",
+                    }
+                }
+            }
+        },
+        {"$match": {"invoice_amount_status": "fully"}},  
+        {"$sort": {sort_by: sort_direction}},
     ]
 
-    count_pipeline = pipeline + [{"$count": "total"}]
-    count_result   = await collection.aggregate(count_pipeline).to_list(length=1)
-    total_count    = count_result[0]["total"] if count_result else 0
+    if not is_scroll_mode:
+        count_pipeline = pipeline + [{"$count": "total"}]
+        count_result = await collection.aggregate(count_pipeline).to_list(length=1)
+        total_count = count_result[0]["total"] if count_result else 0
+    else:
+        total_count = 0
 
-    paged_pipeline = pipeline + [{"$skip": (page - 1) * limit}, {"$limit": limit}]
-    raw_groups     = await collection.aggregate(paged_pipeline).to_list(length=limit)
+    if not is_scroll_mode:
+        paged_pipeline = pipeline + [{"$skip": (page - 1) * limit}, {"$limit": limit}]
+    else:
+        paged_pipeline = pipeline
+
+    raw_groups = await collection.aggregate(paged_pipeline).to_list(length=limit)
 
     def iso(val):
-        if isinstance(val, datetime): return val.isoformat()
-        return val or ""
+        if isinstance(val, datetime):
+            return val.isoformat()
+        if isinstance(val, str):
+            return val
+        return None
 
     result_items = []
     for i, grp in enumerate(raw_groups):
+        total = round_amount(grp.get("totalAmount", 0))
+        paid = round_amount(grp.get("paidAmount", 0))
+        pending = round_amount(grp.get("pendingAmount", 0))
+
         seen_keys: set = set()
         all_history: List = []
         for sub in grp.get("paymentHistoryArrays", []):
@@ -392,39 +516,46 @@ async def get_fully_paid_items(
                 all_history.append(rounded_entry)
         all_history.sort(key=lambda e: e.get("date", "") or "")
 
-        all_items = []
-        for order in grp.get("orders", []):
-            for it in order.get("items", []):
-                all_items.append(round_item_amounts(it))
+        all_orders = grp.get("orders", [])
+        total_orders = len(all_orders)
+        order_skip = (order_page - 1) * order_limit
+        paged_orders = all_orders[order_skip: order_skip + order_limit]
+        order_total_pages = (total_orders + order_limit - 1) // order_limit if order_limit > 0 else 1
 
         result_items.append({
-            "id":                grp.get("id"),
-            "sNo":               (page - 1) * limit + i + 1,
-            "invoiceNumber":     grp.get("invoiceNo", "N/A"),
-            "invoiceNo":         grp.get("invoiceNo", "N/A"),
-            "companyId":         "",
-            "companyName":       grp.get("companyName", ""),
-            "address":           grp.get("address", ""),
-            "phoneNumber":       grp.get("phoneNumber", ""),
-            "items":             all_items,
-            "orders":            grp.get("orders", []),
-            "totalAmount":       round_amount(grp.get("totalAmount", 0)),
-            "paidAmount":        round_amount(grp.get("paidAmount", 0)),
-            "pendingAmount":     round_amount(grp.get("pendingAmount", 0)),
-            "createdDate":       iso(grp.get("createdDate")),
-            "deliveryDate":      iso(grp.get("deliveryDate")),
-            "invoicedDate":      iso(grp.get("invoicedDate")),
-            "fullyPaidDate":     iso(grp.get("fullyPaidDate")),
-            "status":            grp.get("status", ""),
-            "companyStatus":     grp.get("companyStatus", ""),
-            "amountStatus":      grp.get("amountStatus", ""),
-            "paymentMode":       grp.get("paymentMode", ""),
-            "paymentHistory":    all_history,
-            "grossAmount":       round_amount(grp.get("grossAmount", 0)),
+            "id": grp.get("id"),
+            "sNo": (page - 1) * limit + i + 1,
+            "invoiceNumber": grp.get("invoiceNo", "N/A"),
+            "invoiceNo": grp.get("invoiceNo", "N/A"),
+            "companyId": "",
+            "companyName": grp.get("companyName", ""),
+            "address": grp.get("address", ""),
+            "phoneNumber": grp.get("phoneNumber", ""),
+            "orders": paged_orders,
+            "orders_total": total_orders,
+            "orders_page": order_page,
+            "orders_limit": order_limit,
+            "orders_total_pages": order_total_pages,
+            "totalAmount": total,
+            "paidAmount": paid,
+            "pendingAmount": pending,
+            "createdDate": iso(grp.get("createdDate")),
+            "deliveryDate": iso(grp.get("deliveryDate")),
+            "invoicedDate": iso(grp.get("invoicedDate")),
+            "fullyPaidDate": iso(grp.get("fullyPaidDate")),
+            "status": grp.get("status", ""),
+            "companyStatus": grp.get("companyStatus", ""),
+            "amountStatus": "fully",  
+            "paymentMode": grp.get("paymentMode", ""),
+            "paymentHistory": all_history,
+            "grossAmount": round_amount(grp.get("grossAmount", 0)),
             "discountPercentage": round_percentage(grp.get("discountPercentage", 0)),
-            "discountValue":     round_amount(grp.get("discountValue", 0)),
-            "discountAmount":    round_amount(grp.get("discountAmount", 0)),
+            "discountValue": round_amount(grp.get("discountValue", 0)),
+            "discountAmount": round_amount(grp.get("discountAmount", 0)),
+            "chargeAmount": round_amount(grp.get("chargeAmount", 0)),
         })
+
+    next_cursor = str(raw_groups[-1]["last_id"]) if raw_groups else None
 
     return {
         "items": result_items,
@@ -432,24 +563,43 @@ async def get_fully_paid_items(
         "page": page,
         "limit": limit,
         "total_pages": (total_count + limit - 1) // limit if limit > 0 else 0,
+        "next_cursor": next_cursor,
+        "has_more": len(raw_groups) == limit if is_scroll_mode else (page < (total_count + limit - 1) // limit if limit > 0 else 0),
     }
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# VIEW / UPDATE / DELETE / ACTIVATE  — unchanged
-# ─────────────────────────────────────────────────────────────────────────────
-
+ 
+ 
 @router.get("/view/{item_id}", response_model=WholeSaleTakeaway)
 async def get_takeaway(item_id: str):
     collection = get_wholesale_collection()
     if not ObjectId.is_valid(item_id):
         raise HTTPException(status_code=400, detail="Invalid ID")
+    
     item = await collection.find_one({"_id": ObjectId(item_id)})
     if not item:
         raise HTTPException(status_code=404, detail="Not found")
-    return serialize_item(item)
 
+    if "phoneNumber" in item and not isinstance(item.get("phoneNumber"), str):
+        item["phoneNumber"] = str(item.get("phoneNumber"))
+    if "pendingAmount" not in item:
+        total = item.get("totalAmount", 0)
+        paid = item.get("paidAmount", 0)
+        item["pendingAmount"] = round_amount(total - paid)
+    if "amountStatus" not in item:
+        item["amountStatus"] = calculate_amount_status(
+            item.get("paidAmount", 0), 
+            item.get("totalAmount", 0)
+        )
+    if "items" in item and isinstance(item["items"], list):
+        item["items"] = [round_item_amounts(i) for i in item["items"]]
 
+    item["id"] = str(item["_id"])
+    if "_id" in item:
+        del item["_id"]
+
+    return item
+
+ 
 @router.patch("/update/{item_id}", response_model=WholeSaleTakeaway)
 async def update_takeaway(item_id: str, item: WholeSaleTakeawayPost):
     collection = get_wholesale_collection()
@@ -458,141 +608,57 @@ async def update_takeaway(item_id: str, item: WholeSaleTakeawayPost):
     existing_item = await collection.find_one({"_id": ObjectId(item_id)})
     if not existing_item:
         raise HTTPException(status_code=404, detail="Not found")
-
+ 
     update_data = item.dict()
-
+ 
     update_data["grossAmount"]        = round_amount(update_data.get("grossAmount", 0))
     update_data["discountPercentage"] = round_percentage(update_data.get("discountPercentage", 0))
     update_data["discountAmount"]     = round_amount(update_data.get("discountAmount", 0))
     update_data["discountValue"]      = round_amount(update_data.get("discountValue", 0))
     update_data["totalAmount"]        = round_amount(update_data.get("totalAmount", 0))
     update_data["paidAmount"]         = round_amount(update_data.get("paidAmount", 0))
+    update_data["chargeAmount"]       = round_amount(update_data.get("chargeAmount", 0))
 
+ 
     if "items" in update_data and isinstance(update_data["items"], list):
         update_data["items"] = [round_item_amounts(i) for i in update_data["items"]]
-
+ 
     update_data["pendingAmount"] = round_amount(update_data["totalAmount"] - update_data["paidAmount"])
     update_data["amountStatus"]  = calculate_amount_status(
         update_data["paidAmount"], update_data["totalAmount"]
     )
-
+ 
     protected_fields = [
         "orderId", "createdDate", "status", "invoicedDate",
         "fullyPaidDate", "companyStatus", "invoiceNo", "paymentHistory",
     ]
     for field in protected_fields:
         update_data.pop(field, None)
-
+ 
     await collection.update_one({"_id": ObjectId(item_id)}, {"$set": update_data})
     updated_item = await collection.find_one({"_id": ObjectId(item_id)})
     return serialize_item(updated_item)
-
-
-# @router.patch("/update-paid/{invoice_no}")
-# async def update_paid_amount(invoice_no: str, paid_amount: float = Query(...)):
-#     collection = get_wholesale_collection()
-
-#     # ✅ 1. Fetch only required fields (reduces DB payload)
-#     orders = await collection.find(
-#         {"invoiceNo": invoice_no, "status": "active"},
-#         {"_id": 1, "totalAmount": 1}
-#     ).to_list(length=500)
-
-#     if not orders:
-#         raise HTTPException(status_code=404, detail="Invoice not found")
-
-#     # ✅ 2. Convert to integer (safe financial handling)
-#     paid_int = round_amount(paid_amount)
-#     order_totals = [round_amount(o.get("totalAmount", 0)) for o in orders]
-#     total_int = sum(order_totals)
-
-#     # ✅ 3. Validation
-#     if paid_int < 0 or paid_int > total_int:
-#         raise HTTPException(status_code=400, detail="Invalid amount")
-
-#     # ✅ 4. Distribute amount accurately
-#     distributed_paid = distribute_integer(paid_int, order_totals)
-
-#     now = datetime.utcnow()
-#     operations = []
-
-#     # ✅ 5. Prepare bulk operations (NO loop DB calls)
-#     for idx, order in enumerate(orders):
-#         order_total = order_totals[idx]
-#         order_paid = distributed_paid[idx]
-#         order_pending = order_total - order_paid
-#         status = calculate_amount_status(order_paid, order_total)
-
-#         update_fields: Dict[str, Any] = {
-#             "paidAmount": order_paid,
-#             "pendingAmount": order_pending,
-#             "amountStatus": status,
-#         }
-
-#         if status == "fully":
-#             update_fields["fullyPaidDate"] = now
-
-#         operations.append(
-#             UpdateOne(
-#                 {"_id": order["_id"]},
-#                 {"$set": update_fields}
-#             )
-#         )
-
-#     # ✅ 6. Execute ALL updates in ONE DB call
-#     if operations:
-#         await collection.bulk_write(operations)
-
-#     # ✅ 7. Final response
-#     final_paid = sum(distributed_paid)
-#     final_pending = total_int - final_paid
-
-#     return {
-#         "success": True,
-#         "message": "Paid amount updated accurately across all orders",
-#         "data": {
-#             "invoiceNo": invoice_no,
-#             "totalPaid": final_paid,
-#             "totalPending": final_pending,
-#             "calculatedStatus": "fully" if final_pending <= 0 else "partial",
-#             "orderCount": len(orders),
-#         },
-#     }
-
-
-
-
+ 
+ 
 @router.patch("/update-paid/{invoice_no}")
 async def update_paid_amount(invoice_no: str, paid_amount: float = Query(...)):
     collection = get_wholesale_collection()
-
-    # ✅ 1. Fetch orders with ALL required fields for accurate total calculation
     orders = await collection.find(
         {"invoiceNo": invoice_no, "status": "active"},
-        {"_id": 1, "totalAmount": 1, "paidAmount": 1, "pendingAmount": 1, "amountStatus": 1}
+        {"_id": 1, "totalAmount": 1, "paidAmount": 1, "createdDate": 1}
     ).to_list(length=500)
 
     if not orders:
         raise HTTPException(status_code=404, detail="Invoice not found")
-
-    # ✅ 2. Calculate ACTUAL total amount from orders
     order_totals = [round_amount(o.get("totalAmount", 0)) for o in orders]
-    total_int = sum(order_totals)
+    total_invoice_amount = sum(order_totals)
     paid_int = round_amount(paid_amount)
-
-    # ✅ 3. Validation - paid amount cannot exceed total
-    if paid_int < 0 or paid_int > total_int:
-        raise HTTPException(status_code=400, detail=f"Invalid amount. Total invoice amount is {total_int}")
-
-    # ✅ 4. Calculate current total paid across all orders
+    if paid_int < 0 or paid_int > total_invoice_amount:
+        raise HTTPException(status_code=400, detail=f"Invalid amount. Total invoice amount is {total_invoice_amount}")
     current_total_paid = sum(round_amount(o.get("paidAmount", 0)) for o in orders)
-    
-    # ✅ 5. Calculate additional amount to distribute
     additional_amount = paid_int - current_total_paid
-    
     if additional_amount < 0:
         raise HTTPException(status_code=400, detail="Cannot reduce paid amount")
-    
     if additional_amount == 0:
         return {
             "success": True,
@@ -600,55 +666,86 @@ async def update_paid_amount(invoice_no: str, paid_amount: float = Query(...)):
             "data": {
                 "invoiceNo": invoice_no,
                 "totalPaid": paid_int,
-                "totalPending": total_int - paid_int,
-                "calculatedStatus": "fully" if paid_int >= total_int else "partial",
+                "totalPending": total_invoice_amount - paid_int,
+                "calculatedStatus": "fully" if paid_int >= total_invoice_amount else "partial",
                 "orderCount": len(orders),
             },
         }
 
-    # ✅ 6. Distribute ONLY the additional amount across orders based on pending amounts
-    current_pending = [total - round_amount(o.get("paidAmount", 0)) for total, o in zip(order_totals, orders)]
-    total_pending = sum(current_pending)
+    invoice_is_fully_paid = paid_int >= total_invoice_amount
+    invoice_pending = total_invoice_amount - paid_int
+    invoice_status = "fully" if invoice_is_fully_paid else ("partial" if paid_int > 0 else "pending")
+    primary_order = sorted(orders, key=lambda o: o.get("createdDate") or datetime.min)[0]
+    update_fields: Dict[str, Any] = {
+        "invoicePaidAmount": round_amount(paid_int),  
+        "invoicePendingAmount": round_amount(invoice_pending),
+        "invoiceAmountStatus": invoice_status,
+    }
     
-    if total_pending <= 0:
-        return {
-            "success": True,
-            "message": "All orders are already fully paid",
-            "data": {
-                "invoiceNo": invoice_no,
-                "totalPaid": total_int,
-                "totalPending": 0,
-                "calculatedStatus": "fully",
-                "orderCount": len(orders),
-            },
-        }
-    
-    # Distribute additional amount proportionally based on pending amounts
-    distributed_additional = distribute_integer(additional_amount, current_pending)
+    if invoice_is_fully_paid:
+        update_fields["fullyPaidDate"] = datetime.utcnow()
+    await collection.update_one(
+        {"_id": primary_order["_id"]},
+        {"$set": update_fields}
+    )
 
+    return {
+        "success": True,
+        "message": f"Paid amount updated: +{additional_amount} at invoice level",
+        "data": {
+            "invoiceNo": invoice_no,
+            "previousTotalPaid": current_total_paid,
+            "additionalAmount": additional_amount,
+            "totalPaid": paid_int,
+            "totalPending": invoice_pending,
+            "calculatedStatus": invoice_status,
+            "orderCount": len(orders),
+        },
+    }
+
+    
+
+
+@router.patch("/update-payment-mode/{invoice_no}")
+async def update_payment_mode(invoice_no: str, update_data: PaymentModeUpdate):
+    collection = get_wholesale_collection()
+
+    rounded_amount = round_amount(update_data.paid_amount or 0)
+    orders = await collection.find(
+        {"invoiceNo": invoice_no, "status": "active"},
+        {"_id": 1, "totalAmount": 1, "paidAmount": 1, "createdDate": 1}
+    ).to_list(length=500)
+
+    if not orders:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    total_invoice_amount = sum(round_amount(o.get("totalAmount", 0)) for o in orders)
+    current_paid = sum(round_amount(o.get("paidAmount", 0)) for o in orders)
+    new_paid = min(current_paid + rounded_amount, total_invoice_amount)
+    new_pending = total_invoice_amount - new_paid
+    is_fully_paid = new_paid >= total_invoice_amount
+    invoice_status = "fully" if is_fully_paid else ("partial" if new_paid > 0 else "pending")
     now = datetime.utcnow()
+    primary_order = sorted(orders, key=lambda o: o.get("createdDate") or datetime.min)[0]
+
+    history_entry = {
+        "mode": update_data.payment_mode,
+        "amount": rounded_amount,
+        "date": now.isoformat(),
+    }
+
     operations = []
 
-    # ✅ 7. Prepare bulk operations
-    for idx, order in enumerate(orders):
-        order_total = order_totals[idx]
-        current_paid = round_amount(order.get("paidAmount", 0))
-        new_paid = current_paid + distributed_additional[idx]
-        new_pending = order_total - new_paid
-        
-        # Round to handle any floating point issues
-        new_paid = round_amount(new_paid)
-        new_pending = round_amount(new_pending)
-        
-        status = calculate_amount_status(new_paid, order_total)
-
+    for order in orders:
         update_fields: Dict[str, Any] = {
-            "paidAmount": new_paid,
-            "pendingAmount": new_pending,
-            "amountStatus": status,
+            "paymentMode": update_data.payment_mode,
+            "pendingAmount": round_amount(new_pending),  
+            "amountStatus": invoice_status,  
         }
-
-        if status == "fully":
+        
+        if order["_id"] == primary_order["_id"]:
+            update_fields["paidAmount"] = round_amount(new_paid)
+        
+        if is_fully_paid:
             update_fields["fullyPaidDate"] = now
 
         operations.append(
@@ -657,66 +754,26 @@ async def update_paid_amount(invoice_no: str, paid_amount: float = Query(...)):
                 {"$set": update_fields}
             )
         )
+    operations.append(
+        UpdateOne(
+            {"_id": primary_order["_id"]},
+            {"$push": {"paymentHistory": history_entry}}
+        )
+    )
 
-    # ✅ 8. Execute ALL updates in ONE DB call
     if operations:
         await collection.bulk_write(operations)
 
-    # ✅ 9. Verify final totals
-    final_paid = sum(distributed_additional) + current_total_paid
-    final_pending = total_int - final_paid
-
     return {
         "success": True,
-        "message": f"Paid amount updated: +{additional_amount} distributed across {len(orders)} orders",
+        "message": "Payment recorded successfully at invoice level",
         "data": {
             "invoiceNo": invoice_no,
-            "previousTotalPaid": current_total_paid,
-            "additionalAmount": additional_amount,
-            "totalPaid": final_paid,
-            "totalPending": final_pending,
-            "calculatedStatus": "fully" if final_pending <= 0 else "partial",
-            "orderCount": len(orders),
-        },
-    }
-
-
-@router.patch("/update-payment-mode/{invoice_no}")
-async def update_payment_mode(invoice_no: str, update_data: PaymentModeUpdate):
-    collection = get_wholesale_collection()
-
-    rounded_amount = round_amount(update_data.paid_amount or 0)
-
-    history_entry = {
-        "mode":   update_data.payment_mode,
-        "amount": rounded_amount,
-        "date":   datetime.utcnow().isoformat(),
-    }
-
-    await collection.update_many(
-        {"invoiceNo": invoice_no, "status": "active"},
-        {"$set": {"paymentMode": update_data.payment_mode}},
-    )
-
-    # ✅ FIX: always push to PRIMARY order (oldest createdDate) — consistent location
-    primary_order = await collection.find_one(
-        {"invoiceNo": invoice_no, "status": "active"},
-        sort=[("createdDate", 1)],
-    )
-
-    if primary_order:
-        await collection.update_one(
-            {"_id": primary_order["_id"]},
-            {"$push": {"paymentHistory": history_entry}},
-        )
-
-    return {
-        "success": True,
-        "message": "Payment recorded successfully",
-        "data": {
-            "invoiceNo":   invoice_no,
             "paymentMode": update_data.payment_mode,
-            "paidAmount":  rounded_amount,
+            "paidAmount": rounded_amount,
+            "totalPaid": new_paid,
+            "totalPending": new_pending,
+            "calculatedStatus": invoice_status,
         },
     }
 
@@ -789,28 +846,21 @@ async def activate_takeaway(item_id: str):
 
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPER FUNCTION (Renamed for clarity)
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ROUTES (Helper function included)
-# ─────────────────────────────────────────────────────────────────────────────
 
 async def _get_company_total_outstanding(
     collection,
     company_name: str,
 ) -> float:
     """
-    Returns the total pending amount owed by `company_name` across ALL
-    invoiced orders.
+    Calculate total outstanding amount for a company.
+    Now includes both "printed" and "invoiced" company statuses.
     """
     match: Dict[str, Any] = {
         "companyName":   company_name,
-        "companyStatus": "invoiced",
+        "companyStatus": {"$in": ["invoiced", "printed"]},  # ✅ UPDATED: Include "printed"
         "status":        "active",
     }
-
+ 
     pipeline = [
         {"$match": match},
         {
@@ -829,16 +879,13 @@ async def _get_company_total_outstanding(
             }
         },
     ]
-
+ 
     result = await collection.aggregate(pipeline).to_list(length=1)
     if result:
         return max(round(result[0].get("total_outstanding", 0.0), 2), 0.0)
     return 0.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ROUTES
-# ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/generate-order-pdf/{item_id}")
 async def generate_order_pdf(item_id: str):
@@ -860,8 +907,6 @@ async def generate_order_pdf(item_id: str):
     for field in ["createdDate", "deliveryDate", "invoicedDate", "fullyPaidDate"]:
         if field in item and isinstance(item[field], datetime):
             item[field] = item[field].isoformat()
-
-    # Calculate TOTAL outstanding
     company_name = item.get("companyName", "")
     total_outstanding = await _get_company_total_outstanding(
         collection, company_name
@@ -909,18 +954,28 @@ async def generate_invoices_pdf(item_ids: List[str]):
         raise HTTPException(status_code=404, detail="No items found")
 
     items.sort(key=lambda x: x.get("orderId", ""))
-
-    # Calculate TOTAL outstanding
+    total_invoice_amount = sum(float(i.get("totalAmount", 0)) for i in items)
+    total_paid_amount = sum(float(i.get("paidAmount", 0)) for i in items)
+    total_pending_amount = total_invoice_amount - total_paid_amount
+    if total_paid_amount >= total_invoice_amount:
+        amount_status = "fully"
+    elif total_paid_amount == 0:
+        amount_status = "pending"
+    else:
+        amount_status = "partial"
     total_outstanding = await _get_company_total_outstanding(
         collection,
         company_name or "",
     )
 
     company_info = await get_company_details()
-    pdf_bytes    = _build_invoice_pdf(
+    pdf_bytes = _build_invoice_pdf(
         items,
         common_invoice_no,
         company_info,
+        paid_amount=total_paid_amount,    
+        pending_amount=total_pending_amount, 
+        amount_status=amount_status,        
         previous_outstanding=total_outstanding,
     )
     return Response(
@@ -929,60 +984,66 @@ async def generate_invoices_pdf(item_ids: List[str]):
         headers={"Content-Disposition": f"attachment; filename=Invoice_{common_invoice_no}.pdf"},
     )
 
-
 @router.post("/generate-invoice-with-payment/{invoice_no}")
 async def generate_invoice_with_payment(
     invoice_no: str, paymentMode: Optional[str] = None
 ):
-    collection    = get_wholesale_collection()
+    collection = get_wholesale_collection()
     orders_cursor = collection.find({"invoiceNo": invoice_no, "status": "active"})
-    orders        = await orders_cursor.to_list(length=1000)
+    orders = await orders_cursor.to_list(length=1000)
     if not orders:
         raise HTTPException(status_code=404, detail="Invoice not found")
 
-    total_invoice_amount = sum(o.get("totalAmount", 0) for o in orders)
-    total_paid_amount    = sum(o.get("paidAmount",  0) for o in orders)
-    total_pending_amount = sum(o.get("pendingAmount", 0) for o in orders)
-
-    is_fully_paid = round_amount(total_paid_amount) >= round_amount(total_invoice_amount)
-
-    now         = datetime.utcnow()
-    update_data: Dict[str, Any] = {"companyStatus": "invoiced", "invoicedDate": now}
-
+    now = datetime.utcnow()
+    update_data: Dict[str, Any] = {
+        "companyStatus": "invoiced", 
+        "invoicedDate": now
+    }
+    
     if paymentMode:
         update_data["paymentMode"] = paymentMode
-    if is_fully_paid:
-        update_data["amountStatus"]  = "fully"
-        update_data["fullyPaidDate"] = now
-        update_data["pendingAmount"] = 0
-
     await collection.update_many(
-        {"invoiceNo": invoice_no, "status": "active"}, {"$set": update_data}
+        {"invoiceNo": invoice_no, "status": "active"}, 
+        {"$set": update_data}
     )
+    orders = await collection.find({"invoiceNo": invoice_no, "status": "active"}).to_list(length=1000)
+    total_invoice_amount = sum(round_amount(o.get("totalAmount", 0)) for o in orders)
+    total_paid_amount = sum(round_amount(o.get("paidAmount", 0)) for o in orders)
+    total_pending_amount = total_invoice_amount - total_paid_amount
+    
+    is_fully_paid = total_paid_amount >= total_invoice_amount
+    if is_fully_paid:
+        await collection.update_many(
+            {"invoiceNo": invoice_no, "status": "active"},
+            {"$set": {
+                "amountStatus": "fully",
+                "fullyPaidDate": now,
+                "pendingAmount": 0
+            }}
+        )
+        orders = await collection.find({"invoiceNo": invoice_no, "status": "active"}).to_list(length=1000)
+        total_pending_amount = 0
 
-    orders = await collection.find({"invoiceNo": invoice_no}).to_list(length=1000)
-    items  = [serialize_item(dict(order)) for order in orders]
+    items = [serialize_item(dict(order)) for order in orders]
     items.sort(key=lambda x: x.get("orderId", ""))
 
     company_name = items[0].get("companyName", "") if items else ""
 
-    if is_fully_paid:             amount_status = "fully"
-    elif total_paid_amount == 0:  amount_status = "pending"
-    else:                         amount_status = "partial"
-
-    # Calculate TOTAL outstanding
-    total_outstanding = await _get_company_total_outstanding(
-        collection,
-        company_name,
-    )
+    if is_fully_paid:
+        amount_status = "fully"
+    elif total_paid_amount == 0:
+        amount_status = "pending"
+    else:
+        amount_status = "partial"
+    total_outstanding = await _get_company_total_outstanding(collection, company_name)
 
     company_info = await get_company_details()
-    pdf_bytes    = _build_invoice_pdf(
+    pdf_bytes = _build_invoice_pdf(
         items,
         invoice_no,
         company_info,
         paid_amount=total_paid_amount,
-        pending_amount=0 if is_fully_paid else total_pending_amount,
+        pending_amount=total_pending_amount,
         amount_status=amount_status,
         previous_outstanding=total_outstanding,
     )
@@ -992,14 +1053,11 @@ async def generate_invoice_with_payment(
         media_type="application/pdf",
         headers={
             "Content-Disposition": f"attachment; filename=Invoice_{invoice_no}.pdf",
-            "X-Payment-Status":    amount_status,
-            "X-Invoice-Number":    invoice_no,
+            "X-Payment-Status": amount_status,
+            "X-Invoice-Number": invoice_no,
         },
     )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DASHBOARD & STATS  — unchanged
-# ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/dashboard-stats", response_model=dict)
 async def get_dashboard_stats(
@@ -1094,33 +1152,69 @@ async def get_dashboard_stats(
                         {"$divide": [{"$ifNull": ["$items.quantityGrams", 0]}, 1000]},
                     ]
                 },
-                "perUnitDiscount": {
-                    "$cond": [
-                        {"$gt": [{"$ifNull": ["$items.discountValue", 0]}, 0]},
-                        {"$min": [{"$ifNull": ["$items.discountValue", 0]}, "$items.variance_Defaultprice"]},
-                        {
-                            "$multiply": [
-                                "$items.variance_Defaultprice",
-                                {"$divide": [{"$ifNull": ["$items.discountPercentage", 0]}, 100]},
-                            ]
-                        },
-                    ]
-                },
             }
         },
         {
             "$addFields": {
-                "netRevenue": {
+                "lineTotal": {
                     "$multiply": [
-                        {"$subtract": ["$items.variance_Defaultprice", "$perUnitDiscount"]},
+                        {"$ifNull": ["$items.variance_Defaultprice", 0]},
                         "$effectiveQty",
                     ]
                 }
             }
         },
         {
+            "$addFields": {
+                "totalDiscount": {
+                    "$cond": [
+                        {"$gt": [{"$ifNull": ["$items.discountValue", 0]}, 0]},
+                        {"$min": [
+                            {"$ifNull": ["$items.discountValue", 0]},
+                            "$lineTotal",
+                        ]},
+                        {
+                            "$multiply": [
+                                "$lineTotal",
+                                {"$divide": [{"$ifNull": ["$items.discountPercentage", 0]}, 100]},
+                            ]
+                        },
+                    ]
+                }
+            }
+        },
+        {
+            "$addFields": {
+                "netRevenue": {
+                    "$subtract": ["$lineTotal", "$totalDiscount"]
+                }
+            }
+        },
+        {
+            "$addFields": {
+                "combinedItemName": {
+                    "$cond": [
+                        {
+                            "$and": [
+                                {"$ne": [{"$ifNull": ["$items.itemName", ""]}, ""]},
+                                {"$ne": [{"$ifNull": ["$items.varianceName", ""]}, ""]}
+                            ]
+                        },
+                        {"$concat": ["$items.itemName", " - ", "$items.varianceName"]},
+                        {
+                            "$cond": [
+                                {"$ne": [{"$ifNull": ["$items.varianceName", ""]}, ""]},
+                                "$items.varianceName",
+                                {"$ifNull": ["$items.itemName", "Unknown Item"]}
+                            ]
+                        }
+                    ]
+                }
+            }
+        },
+        {
             "$group": {
-                "_id":           "$items.varianceName",
+                "_id": "$combinedItemName",
                 "totalQuantity": {"$sum": "$effectiveQty"},
                 "totalRevenue":  {"$sum": {"$round": ["$netRevenue", 0]}},
                 "count":         {"$sum": 1},
@@ -1187,12 +1281,12 @@ async def get_dashboard_stats(
                             "_id":            {"$ifNull": ["$invoiceNo", "$orderId"]},
                             "total_amount":   {"$sum": {"$ifNull": ["$totalAmount",   0]}},
                             "paid_amount":    {"$sum": {"$ifNull": ["$paidAmount",    0]}},
-                            "pending_amount": {"$sum": {"$ifNull": ["$pendingAmount", 0]}},
                             "companyStatus":  {"$first": "$companyStatus"},
                         }
                     },
                     {
                         "$addFields": {
+                            "pending_amount": {"$subtract": ["$total_amount", "$paid_amount"]},
                             "invoice_amount_status": {
                                 "$switch": {
                                     "branches": [
@@ -1232,7 +1326,6 @@ async def get_dashboard_stats(
                             "companyStatus": {"$first": "$companyStatus"},
                             "totalAmount":   {"$sum": {"$ifNull": ["$totalAmount",   0]}},
                             "paidAmount":    {"$sum": {"$ifNull": ["$paidAmount",    0]}},
-                            "pendingAmount": {"$sum": {"$ifNull": ["$pendingAmount", 0]}},
                             "createdDate":   {"$min": "$createdDate"},
                             "docId":         {"$first": {"$toString": "$_id"}},
                         }
@@ -1241,6 +1334,7 @@ async def get_dashboard_stats(
                         "$addFields": {
                             "paid_amount":  "$paidAmount",
                             "total_amount": "$totalAmount",
+                            "pending_amount": {"$subtract": ["$totalAmount", "$paidAmount"]},
                             "invoice_amount_status": {
                                 "$switch": {
                                     "branches": [
@@ -1270,7 +1364,7 @@ async def get_dashboard_stats(
                             "amountStatus":  "$invoice_amount_status",
                             "totalAmount":   {"$round": ["$totalAmount",   2]},
                             "paidAmount":    {"$round": ["$paidAmount",    2]},
-                            "pendingAmount": {"$round": ["$pendingAmount", 2]},
+                            "pendingAmount": {"$round": ["$pending_amount", 2]},
                             "createdDate":   {
                                 "$dateToString": {"format": "%Y-%m-%d", "date": "$createdDate"}
                             },
@@ -1296,6 +1390,7 @@ async def get_dashboard_stats(
                     },
                     {
                         "$addFields": {
+                            "pending_amount": {"$subtract": ["$totalAmount", "$paidAmount"]},
                             "invoice_amount_status": {
                                 "$switch": {
                                     "branches": [
@@ -1374,43 +1469,35 @@ async def get_dashboard_stats(
         raise HTTPException(status_code=500, detail=f"Dashboard error: {e}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PAYMENT TRACKING  — unchanged
-# ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/payment-tracking", response_model=dict)
 async def get_payment_tracking(
     customer:   Optional[str] = Query(None),
-    start_date: Optional[str] = Query(None), # Expecting YYYY-MM-DD
-    end_date:   Optional[str] = Query(None),   # Expecting YYYY-MM-DD
+    start_date: Optional[str] = Query(None), 
+    end_date:   Optional[str] = Query(None),   
 ):
     collection = get_wholesale_collection()
-
-    # ✅ LOGIC UPDATE: Filter by 'invoiced' status
-    match: Dict = {"status": "active", "companyStatus": "invoiced"}
-
+    match: Dict = {
+        "status": "active",
+        "companyStatus": {"$in": ["invoiced", "printed"]}  # ✅ UPDATED: Include "printed"
+    }
+ 
     if customer:
         match["companyName"] = {"$regex": customer, "$options": "i"}
-
-    # ✅ FIX: Use deliveryDate for filtering revenue (more accurate for "realized" revenue)
-    # You can switch this to "createdDate" or "invoicedDate" depending on business logic.
+ 
     if start_date or end_date:
         date_f: Dict = {}
         if start_date:
-            # ✅ Start of the selected day (00:00:00)
-            # We append 00:00:00 to ensure we get the very beginning of that day
             start_dt = datetime.strptime(start_date, "%Y-%m-%d")
             date_f["$gte"] = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
             
         if end_date:
-            # ✅ End of the selected day (23:59:59.999999)
-            # This ensures we capture records logged late in the evening on the end date
             end_dt = datetime.strptime(end_date, "%Y-%m-%d")
             date_f["$lte"] = end_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
         
-        # ✅ APPLYING FILTER TO deliveryDate
+ 
         match["deliveryDate"] = date_f
-
+ 
     pipeline = [
         {"$match": match},
         {
@@ -1418,7 +1505,11 @@ async def get_payment_tracking(
                 "_id":           {"$ifNull": ["$invoiceNo", "$orderId"]},
                 "total_revenue": {"$sum": "$totalAmount"},
                 "total_paid":    {"$sum": "$paidAmount"},
-                "total_pending": {"$sum": "$pendingAmount"},
+            }
+        },
+        {
+            "$addFields": {
+                "total_pending": {"$subtract": ["$total_revenue", "$total_paid"]}
             }
         },
         {
@@ -1431,9 +1522,9 @@ async def get_payment_tracking(
             }
         },
     ]
-
+ 
     result = await collection.aggregate(pipeline).to_list(length=1)
-
+ 
     totals = {"revenue": 0.0, "paid": 0.0, "pending": 0.0, "collection_rate": 0.0}
     if result:
         d = result[0]
@@ -1442,13 +1533,10 @@ async def get_payment_tracking(
         totals["pending"] = round(d.get("total_pending", 0.0), 2)
         if totals["revenue"] > 0:
             totals["collection_rate"] = round(totals["paid"] / totals["revenue"] * 100, 2)
-
+ 
     return {"totals": totals}
+ 
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CUSTOMER OPTIONS  — unchanged
-# ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/customer-options")
 async def get_customer_options(
@@ -1485,9 +1573,6 @@ async def get_customer_options(
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CUSTOMER LEDGER  — FIXED (running balance before date filter)
-# ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("/customer-ledger/{company_name}")
 async def get_customer_ledger(
@@ -1497,40 +1582,41 @@ async def get_customer_ledger(
 ):
     collection           = get_wholesale_collection()
     decoded_company_name = urllib.parse.unquote(company_name)
-
+ 
     parsed_start = datetime.fromisoformat(start_date) if start_date else None
     parsed_end   = None
     if end_date:
         parsed_end = datetime.fromisoformat(end_date)
         parsed_end = parsed_end.replace(hour=23, minute=59, second=59, microsecond=999999)
-
+ 
+    # ✅ UPDATED: Include both "invoiced" and "printed" statuses
     filter_query = {
         "companyName":   decoded_company_name,
-        "companyStatus": "invoiced",
+        "companyStatus": {"$in": ["invoiced", "printed"]},
     }
-
+ 
     orders = await collection.find(filter_query).sort("createdDate", 1).to_list(length=1000)
-
+ 
     if not orders:
         return {
             "summary": {"total_billed": 0, "total_paid": 0, "current_outstanding": 0},
             "ledger":  [],
         }
-
-    # Group by invoice, deduplicate payments — same logic as before
+ 
     invoice_map: Dict = {}
     for order in orders:
         invoice_no = order.get("invoiceNo") or order.get("orderId", "N/A")
         if invoice_no not in invoice_map:
-            invoice_map[invoice_no] = {
-                "invoice_no":        invoice_no,
-                "date":              order.get("createdDate"),
-                "total":             0,
-                "payment_history":   [],
-                "seen_payment_keys": set(),
-            }
+           invoice_map[invoice_no] = {
+             "invoice_no":        invoice_no,
+             "date":              order.get("createdDate"),
+             "total":             0,
+             "payment_history":   [],
+             "seen_payment_keys": set(),
+             "company_status":    order.get("companyStatus", "invoiced"),  # ADD THIS LINE
+           }
         invoice_map[invoice_no]["total"] += order.get("totalAmount", 0)
-
+ 
         for pmt in order.get("paymentHistory", []):
             pmt_amt   = pmt.get("amount", 0)
             pmt_mode  = pmt.get("mode", "N/A")
@@ -1542,29 +1628,31 @@ async def get_customer_ledger(
             invoice_map[invoice_no]["payment_history"].append(
                 {"mode": pmt_mode, "amount": pmt_amt, "date": pmt_date}
             )
-
+ 
     raw_events: List = []
     for inv in invoice_map.values():
         inv_date = inv["date"]
         if isinstance(inv_date, str):
             try:    inv_date = datetime.fromisoformat(inv_date)
             except: inv_date = None
-
+ 
+        _is_printed = inv.get("company_status") == "printed"
+        _entry_type = "Order" if _is_printed else "Invoice"
         raw_events.append({
-            "date":        inv_date.isoformat() if inv_date else None,
-            "type":        "Invoice",
-            "ref_id":      inv["invoice_no"],
-            "description": f"Invoice for {decoded_company_name}",
-            "debit":       inv["total"],
-            "credit":      0,
-        })
-
+          "date":        inv_date.isoformat() if inv_date else None,
+          "type":        _entry_type,
+          "ref_id":      inv["invoice_no"],
+          "description": f"{_entry_type} for {decoded_company_name}",
+          "debit":       inv["total"],
+          "credit":      0,
+       })
+ 
         for pmt in inv["payment_history"]:
             pmt_date = pmt["date"]
             if isinstance(pmt_date, str):
                 try:    pmt_date = datetime.fromisoformat(pmt_date).isoformat()
                 except: pmt_date = inv_date.isoformat() if inv_date else None
-
+ 
             raw_events.append({
                 "date":        pmt_date,
                 "type":        "Payment",
@@ -1573,18 +1661,16 @@ async def get_customer_ledger(
                 "debit":       0,
                 "credit":      pmt["amount"],
             })
-
+ 
     raw_events.sort(key=lambda x: x["date"] if x["date"] else "")
-
-    # ✅ FIX: calculate running balance over ALL events first
+ 
     running_balance = 0.0
     all_events_with_balance = []
     for event in raw_events:
         running_balance += event["debit"]
         running_balance -= event["credit"]
         all_events_with_balance.append({**event, "balance": running_balance})
-
-    # ✅ FIX: then filter for display only — balance values are already correct
+ 
     ledger_entries = []
     for event in all_events_with_balance:
         event_date_str = event["date"]
@@ -1598,15 +1684,14 @@ async def get_customer_ledger(
             except Exception:
                 pass
         ledger_entries.append(event)
-
-    total_billed = sum(e["debit"]  for e in ledger_entries if e["type"] == "Invoice")
+ 
+    total_billed = sum(e["debit"]  for e in ledger_entries if e["type"] in ("Invoice", "Order"))
     total_paid   = sum(e["credit"] for e in ledger_entries if e["type"] == "Payment")
-
+ 
     return {
         "summary": {
             "total_billed":        total_billed,
             "total_paid":          total_paid,
-            # ✅ always the real outstanding over full history, not just filtered window
             "current_outstanding": running_balance,
         },
         "ledger": ledger_entries,
@@ -1622,19 +1707,20 @@ async def download_customer_ledger_pdf(
     company_info         = await get_company_details()
     collection           = get_wholesale_collection()
     decoded_company_name = urllib.parse.unquote(company_name)
-
+ 
     parsed_start = datetime.fromisoformat(start_date) if start_date else None
     parsed_end   = None
     if end_date:
         parsed_end = datetime.fromisoformat(end_date)
         parsed_end = parsed_end.replace(hour=23, minute=59, second=59, microsecond=999999)
-
+ 
+    # ✅ UPDATED: Include both "invoiced" and "printed" statuses
     filter_query = {
         "companyName":   decoded_company_name,
-        "companyStatus": "invoiced",
+        "companyStatus": {"$in": ["invoiced", "printed"]},
     }
     orders = await collection.find(filter_query).sort("createdDate", 1).to_list(length=1000)
-
+ 
     if not orders:
         buffer = build_ledger_pdf(
             company_name, company_info, [], 0, 0, 0, start_date, end_date, 0
@@ -1644,14 +1730,14 @@ async def download_customer_ledger_pdf(
             media_type="application/pdf",
             headers={"Content-Disposition": f"attachment; filename=Ledger_{decoded_company_name}.pdf"},
         )
-
+ 
     invoice_map: Dict         = {}
     total_discount_all: float = 0.0
-
+ 
     for order in orders:
         invoice_no = order.get("invoiceNo") or order.get("orderId", "N/A")
         total_discount_all += order.get("discountAmount", 0) or 0
-
+ 
         if invoice_no not in invoice_map:
             invoice_map[invoice_no] = {
                 "invoice_no":        invoice_no,
@@ -1659,10 +1745,11 @@ async def download_customer_ledger_pdf(
                 "total":             0,
                 "payment_history":   [],
                 "seen_payment_keys": set(),
+                "company_status":    order.get("companyStatus", "invoiced"),
             }
-
+ 
         invoice_map[invoice_no]["total"] += order.get("totalAmount", 0)
-
+ 
         for pmt in order.get("paymentHistory", []):
             pmt_amt   = pmt.get("amount", 0)
             pmt_mode  = pmt.get("mode", "N/A")
@@ -1674,29 +1761,30 @@ async def download_customer_ledger_pdf(
             invoice_map[invoice_no]["payment_history"].append(
                 {"mode": pmt_mode, "amount": pmt_amt, "date": pmt_date}
             )
-
+ 
     raw_events = []
     for inv in invoice_map.values():
         inv_date = inv["date"]
         if isinstance(inv_date, str):
             try:    inv_date = datetime.fromisoformat(inv_date)
             except: inv_date = None
-
+ 
+        _is_printed = inv.get("company_status") == "printed"
+        _entry_type = "Order" if _is_printed else "Invoice"
         raw_events.append({
             "date":        inv_date,
-            "type":        "Invoice",
+            "type":        _entry_type,
             "ref_id":      inv["invoice_no"],
-            "description": f"Invoice for {decoded_company_name}",
+            "description": f"{_entry_type} for {decoded_company_name}",
             "debit":       inv["total"],
             "credit":      0,
         })
-
         for pmt in inv["payment_history"]:
             pmt_date = pmt["date"]
             if isinstance(pmt_date, str):
                 try:    pmt_date = datetime.fromisoformat(pmt_date)
                 except: pmt_date = inv_date
-
+ 
             raw_events.append({
                 "date":        pmt_date,
                 "type":        "Payment",
@@ -1705,18 +1793,15 @@ async def download_customer_ledger_pdf(
                 "debit":       0,
                 "credit":      pmt["amount"],
             })
-
+ 
     raw_events.sort(key=lambda x: x["date"] if x["date"] else datetime.min)
-
-    # ✅ FIX: full running balance before date filter
     running_balance = 0.0
     all_events_with_balance = []
     for event in raw_events:
         running_balance += event["debit"]
         running_balance -= event["credit"]
         all_events_with_balance.append({**event, "balance": running_balance})
-
-    # ✅ FIX: filter for display only
+ 
     ledger_entries = []
     for event in all_events_with_balance:
         event_date = event["date"]
@@ -1733,27 +1818,28 @@ async def download_customer_ledger_pdf(
             except Exception:
                 pass
         ledger_entries.append(event)
-
-    total_billed = sum(e["debit"]  for e in ledger_entries if e["type"] == "Invoice")
+ 
+    total_billed = sum(e["debit"]  for e in ledger_entries if e["type"] in ("Invoice", "Order"))
     total_paid   = sum(e["credit"] for e in ledger_entries if e["type"] == "Payment")
-
+ 
     buffer = build_ledger_pdf(
         company_name,
         company_info,
         ledger_entries,
         total_billed,
         total_paid,
-        running_balance,   # ✅ full outstanding always
+        running_balance,
         start_date,
         end_date,
         total_discount_amount=total_discount_all,
     )
-
+ 
     return StreamingResponse(
         buffer,
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename=Ledger_{decoded_company_name}.pdf"},
     )
+ 
 
 
 @router.get("/customer-ledger-csv/{company_name}")
@@ -1764,32 +1850,34 @@ async def download_customer_ledger_csv(
 ):
     collection           = get_wholesale_collection()
     decoded_company_name = urllib.parse.unquote(company_name)
-
+ 
     parsed_start = datetime.fromisoformat(start_date) if start_date else None
     parsed_end   = None
     if end_date:
         parsed_end = datetime.fromisoformat(end_date)
         parsed_end = parsed_end.replace(hour=23, minute=59, second=59, microsecond=999999)
-
+ 
+    # ✅ UPDATED: Include both "invoiced" and "printed" statuses
     filter_query = {
         "companyName":   decoded_company_name,
-        "companyStatus": "invoiced",
+        "companyStatus": {"$in": ["invoiced", "printed"]},
     }
     orders = await collection.find(filter_query).sort("createdDate", 1).to_list(length=1000)
-
+ 
     invoice_map: Dict = {}
     for order in orders:
         invoice_no = order.get("invoiceNo") or order.get("orderId", "N/A")
         if invoice_no not in invoice_map:
-            invoice_map[invoice_no] = {
-                "invoice_no":        invoice_no,
-                "date":              order.get("createdDate"),
-                "total":             0,
-                "payment_history":   [],
-                "seen_payment_keys": set(),
+           invoice_map[invoice_no] = {
+               "invoice_no":        invoice_no,
+               "date":              order.get("createdDate"),
+               "total":             0,
+               "payment_history":   [],
+               "seen_payment_keys": set(),
+               "company_status":    order.get("companyStatus", "invoiced"),  # ADD THIS LINE
             }
         invoice_map[invoice_no]["total"] += order.get("totalAmount", 0)
-
+ 
         for pmt in order.get("paymentHistory", []):
             pmt_amt   = pmt.get("amount", 0)
             pmt_mode  = pmt.get("mode", "N/A")
@@ -1801,29 +1889,31 @@ async def download_customer_ledger_csv(
             invoice_map[invoice_no]["payment_history"].append(
                 {"mode": pmt_mode, "amount": pmt_amt, "date": pmt_date}
             )
-
+ 
     raw_events = []
     for inv in invoice_map.values():
         inv_date = inv["date"]
         if isinstance(inv_date, str):
             try:    inv_date = datetime.fromisoformat(inv_date)
             except: inv_date = None
-
+ 
+        _is_printed = inv.get("company_status") == "printed"
+        _entry_type = "Order" if _is_printed else "Invoice"
         raw_events.append({
             "date":        inv_date,
-            "type":        "Invoice",
+            "type":        _entry_type,
             "ref_id":      inv["invoice_no"],
-            "description": f"Invoice {inv['invoice_no']}",
+            "description": f"{_entry_type} {inv['invoice_no']}",
             "debit":       inv["total"],
             "credit":      0,
         })
-
+ 
         for pmt in inv["payment_history"]:
             pmt_date = pmt["date"]
             if isinstance(pmt_date, str):
                 try:    pmt_date = datetime.fromisoformat(pmt_date)
                 except: pmt_date = inv_date
-
+ 
             raw_events.append({
                 "date":        pmt_date,
                 "type":        "Payment",
@@ -1832,18 +1922,15 @@ async def download_customer_ledger_csv(
                 "debit":       0,
                 "credit":      pmt["amount"],
             })
-
+ 
     raw_events.sort(key=lambda x: x["date"] if x["date"] else datetime.min)
-
-    # ✅ FIX: full running balance before date filter
     running_balance = 0.0
     all_events_with_balance = []
     for event in raw_events:
         running_balance += event["debit"]
         running_balance -= event["credit"]
         all_events_with_balance.append({**event, "balance": running_balance})
-
-    # ✅ FIX: filter for display only
+ 
     ledger_data = []
     for event in all_events_with_balance:
         event_date = event["date"]
@@ -1868,48 +1955,39 @@ async def download_customer_ledger_csv(
             "Credit (Rs.)":  event["credit"],
             "Balance (Rs.)": event["balance"],
         })
-
+ 
     df = pd.DataFrame(ledger_data)
     if not df.empty:
         df.sort_values(by=["Date"], inplace=True)
-
+ 
     output = BytesIO()
     writer = pd.ExcelWriter(output, engine="xlsxwriter")
     df.to_excel(writer, index=False, sheet_name="Ledger")
-
     workbook  = writer.book
     worksheet = writer.sheets["Ledger"]
-
-    # ─────────────────────────────────────────────────────────────
-    # 1. DEFINE ATTRACTIVE FORMATS
-    # ─────────────────────────────────────────────────────────────
-
-    # --- Header Format (Pink & Professional) ---
     header_format = workbook.add_format({
         "bold": True, 
         "font_name": "Arial",
         "font_size": 12,
-        "font_color": "#FFFFFF",          # White text
-        "bg_color": "#b43880",            # Primary Pink
+        "font_color": "#FFFFFF",         
+        "bg_color": "#b43880",           
         "border": 1, 
-        "border_color": "#8e2e64",        # Darker Pink Border
+        "border_color": "#8e2e64",       
         "align": "center",
         "valign": "vcenter",
         "text_wrap": True,
     })
-
-    # --- Money Format (Numbers) ---
+ 
     money_format = workbook.add_format({
         "num_format": "#,##0.00",
         "font_name": "Arial",
         "font_size": 10,
         "valign": "vcenter",
         "border": 1, 
-        "border_color": "#E0E0E0",        # Light Grey Border
+        "border_color": "#E0E0E0",       
         "text_wrap": True,
     })
-
-    # --- Date Format ---
+ 
     date_format = workbook.add_format({
         "num_format": "dd-mm-yyyy",
         "font_name": "Arial",
@@ -1919,8 +1997,7 @@ async def download_customer_ledger_csv(
         "border_color": "#E0E0E0",
         "text_wrap": True,
     })
-
-    # --- Text Format (Default) ---
+ 
     text_format = workbook.add_format({
         "font_name": "Arial",
         "font_size": 10,
@@ -1929,20 +2006,17 @@ async def download_customer_ledger_csv(
         "border_color": "#E0E0E0",
         "text_wrap": True,
     })
-
-    # --- Row Alternating Colors (Zebra Striping) ---
-    # Pink tint for even rows, White for odd rows
+ 
     even_row_format = workbook.add_format({
         "font_name": "Arial",
         "font_size": 10,
         "valign": "vcenter",
         "border": 1,
         "border_color": "#E0E0E0",
-        "bg_color": "#FFF0F5",            # Lavender Blush (Very light pink)
+        "bg_color": "#FFF0F5",            
         "text_wrap": True,
     })
     
-    # Currency format specifically for even rows
     even_row_money_format = workbook.add_format({
         "num_format": "#,##0.00",
         "font_name": "Arial",
@@ -1950,10 +2024,9 @@ async def download_customer_ledger_csv(
         "valign": "vcenter",
         "border": 1,
         "border_color": "#E0E0E0",
-        "bg_color": "#FFF0F5",            # Lavender Blush
+        "bg_color": "#FFF0F5",           
     })
     
-    # Date format specifically for even rows
     even_row_date_format = workbook.add_format({
         "num_format": "dd-mm-yyyy",
         "font_name": "Arial",
@@ -1961,66 +2034,40 @@ async def download_customer_ledger_csv(
         "valign": "vcenter",
         "border": 1,
         "border_color": "#E0E0E0",
-        "bg_color": "#FFF0F5",            # Lavender Blush
+        "bg_color": "#FFF0F5",          
     })
-
-    # ─────────────────────────────────────────────────────────────
-    # 2. APPLY COLUMN WIDTHS
-    # ─────────────────────────────────────────────────────────────
-    worksheet.set_column("A:A", 18) # Date
-    worksheet.set_column("B:B", 14) # Type
-    worksheet.set_column("C:C", 20) # Reference
-    worksheet.set_column("D:D", 35) # Description
-    worksheet.set_column("E:E", 16) # Debit
-    worksheet.set_column("F:F", 16) # Credit
-    worksheet.set_column("G:G", 18) # Balance
-
-    # Set a subtle grey background for the whole sheet for a premium feel
+ 
+    worksheet.set_column("A:A", 18) 
+    worksheet.set_column("B:B", 14) 
+    worksheet.set_column("C:C", 20)
+    worksheet.set_column("D:D", 35) 
+    worksheet.set_column("E:E", 16) 
+    worksheet.set_column("F:F", 16) 
+    worksheet.set_column("G:G", 18) 
     worksheet.set_default_row(hide_unused_rows=False)
-
-    # ─────────────────────────────────────────────────────────────
-    # 3. WRITE HEADER
-    # ─────────────────────────────────────────────────────────────
     for col_num, value in enumerate(df.columns.values):
         worksheet.write(0, col_num, value, header_format)
-
-    # ─────────────────────────────────────────────────────────────
-    # 4. WRITE DATA WITH STYLING
-    # ─────────────────────────────────────────────────────────────
     for row_num in range(1, len(df) + 1):
-        # Determine if this is an even row for zebra striping
         is_even = (row_num % 2 == 0)
-        
-        # Select formats based on row parity
         curr_date_fmt = even_row_date_format if is_even else date_format
         curr_text_fmt  = even_row_format if is_even else text_format
         curr_money_fmt = even_row_money_format if is_even else money_format
-
-        # Write Date (Column A)
         if pd.notna(df.iloc[row_num - 1]["Date"]):
             worksheet.write_datetime(row_num, 0, df.iloc[row_num - 1]["Date"], curr_date_fmt)
         else:
             worksheet.write(row_num, 0, "", curr_text_fmt)
-
-        # Write Text Columns (B, C, D)
         for col_num in [1, 2, 3]:
             val = df.iloc[row_num - 1, col_num]
             worksheet.write(row_num, col_num, val if pd.notna(val) else "", curr_text_fmt)
-
-        # Write Money Columns (E, F, G)
         worksheet.write(row_num, 4, df.iloc[row_num - 1]["Debit (Rs.)"],   curr_money_fmt)
         worksheet.write(row_num, 5, df.iloc[row_num - 1]["Credit (Rs.)"],  curr_money_fmt)
         worksheet.write(row_num, 6, df.iloc[row_num - 1]["Balance (Rs.)"], curr_money_fmt)
-
-    # Freeze the top header row
     worksheet.freeze_panes(1, 0)
-    
-    # Add a filter to the header row (Dropdowns)
     worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
-
+ 
     writer.close()
     output.seek(0)
-
+ 
     return StreamingResponse(
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2028,3 +2075,5 @@ async def download_customer_ledger_csv(
             "Content-Disposition": f"attachment; filename=Ledger_{decoded_company_name}.xlsx"
         },
     )
+ 
+

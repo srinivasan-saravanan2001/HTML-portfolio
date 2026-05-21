@@ -13,12 +13,9 @@ from .utils import get_customer_collection
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# ==========================================================
-# HELPER: ID GENERATION (Only for Creation)
-# ==========================================================
+
 async def generate_customer_id():
     collection = get_customer_collection()
-    # Use aggregation to find max ID efficiently
     pipeline = [
         {"$match": {"customerId": {"$regex": "^CUST"}}},
         {"$sort": {"customerId": -1}},
@@ -34,39 +31,26 @@ async def generate_customer_id():
     number = int(last_id.replace("CUST", ""))
     return f"CUST{number + 1:03d}"
 
-# ==========================================================
-# CUSTOMER CRUD
-# ==========================================================
-
 @router.post("/", response_model=Customer)
 async def create_customer(customer: CustomerPost):
     collection = get_customer_collection()
     new_customer = customer.dict()
-    
-    # Generate sequential ID
     customer_id = await generate_customer_id()
     new_customer["customerId"] = customer_id
-    
-    # Ensure status
     if not new_customer.get("status"):
         new_customer["status"] = "customer"
-    
-    # ✅ WRAP INSERTION IN TRY-EXCEPT
     try:
         result = await collection.insert_one(new_customer)
     except DuplicateKeyError:
-        # This catches the E11000 error and sends a clean response
         raise HTTPException(
             status_code=409, 
             detail="A customer with this phone number already exists."
         )
-    
-    # Return the created object
     return Customer(
         customerId=str(result.inserted_id),
         customerName=new_customer.get("customerName", ""),
         customerPhoneNumber=new_customer.get("customerPhoneNumber", ""),
-        status=new_customer.get("status", "customer"), # Changed from "active" to "customer" based on your logic
+        status=new_customer.get("status", "customer"), 
         address=new_customer.get("address", "")
     )
 
@@ -79,8 +63,6 @@ async def get_all_customers(
 ):
     collection = get_customer_collection()
     skip = (page - 1) * limit
-
-    # Build Match Stage
     match_stage = {}
     if status:
         match_stage["status"] = status
@@ -90,14 +72,12 @@ async def get_all_customers(
         match_stage["$or"] = [
             {"customerName": search_regex},
             {"customerPhoneNumber": search_regex},
-            {"customerId": search_regex}, # Search by legacy ID too
+            {"customerId": search_regex},
             {"address": search_regex}
         ]
-
-    # Optimized Aggregation Pipeline
     pipeline = [
         {"$match": match_stage},
-        {"$sort": {"_id": -1}}, # Sort by ObjectId (timestamp)
+        {"$sort": {"_id": -1}},
         {
             "$facet": {
                 "metadata": [{"$count": "total"}],
@@ -106,7 +86,7 @@ async def get_all_customers(
                     {"$limit": limit},
                     {"$project": {
                         "_id": 0,
-                        "customerId": {"$toString": "$_id"}, # Convert _id to string for frontend
+                        "customerId": {"$toString": "$_id"}, 
                         "customerName": 1,
                         "customerPhoneNumber": 1,
                         "status": 1,
@@ -135,7 +115,7 @@ async def get_all_customers(
         "data": data
     }
 
-# --- Export Excel (Optimized with Aggregation) ---
+
 @router.get("/export-excel")
 async def export_customers_excel(
     search: Optional[str] = Query(None),
@@ -396,100 +376,3 @@ async def delete_customer(customer_id: str):
 
 
 
-# ==========================================================
-# 🧾 CUSTOMER LEDGER ENDPOINT
-# ==========================================================
-# @router.get("/ledger/{customerNumber}")
-# async def get_customer_ledger(customerNumber: str):
-#     """
-#     Customer Ledger API:
-#     Shows all orders + advances in credit/debit style.
-#     - Credit = total/final price of order
-#     - Debit = every advance amount
-#     - Balance = credit - debit
-#     """
-#     try:
-#         collection =  get_salesOrder_collection()
-
-#         # ✅ Proper async fetch if using Motor client
-#         cursor = await collection.find({"customerNumber": customerNumber})
-#         orders = [order async for order in cursor]
-
-#         # ✅ Handle case where no data exists
-#         if not orders:
-#             return {
-#                 "status": "no_data",
-#                 "message": f"No data found for customer number {customerNumber}"
-#             }
-
-#         ledger_entries = []
-#         total_credit = 0.0
-#         total_debit = 0.0
-
-#         for order in orders:
-#             sale_order_no = order.get("saleOrderNo", "")
-#             order_date = order.get("orderDate", "")
-#             delivery_date = order.get("deliveryDate", "")
-#             customer_name = order.get("customerName", "")
-#             final_price = float(order.get("finalPrice", order.get("totalAmount", 0.0)))
-
-#             # 1️⃣ Credit Entry
-#             ledger_entries.append({
-#                 "saleOrderNo": sale_order_no,
-#                 "orderDate": order_date,
-#                 "deliveryDate": delivery_date,
-#                 "description": "Order Placed",
-#                 "credit": round(final_price, 2),
-#                 "debit": 0.0,
-#                 "balance": round(final_price, 2)
-#             })
-#             total_credit += final_price
-
-#             # 2️⃣ Debit Entries (Advances)
-#             advance_amounts = order.get("advanceAmount", [])
-#             if isinstance(advance_amounts, list):
-#                 for idx, adv in enumerate(advance_amounts):
-#                     adv_value = float(adv or 0)
-#                     total_debit += adv_value
-#                     remaining_balance = final_price - sum(float(a or 0) for a in advance_amounts[: idx + 1])
-
-#                     ledger_entries.append({
-#                         "saleOrderNo": sale_order_no,
-#                         "orderDate": order_date,
-#                         "deliveryDate": delivery_date,
-#                         "description": f"Advance Payment {idx + 1}",
-#                         "credit": 0.0,
-#                         "debit": round(adv_value, 2),
-#                         "balance": round(remaining_balance, 2)
-#                     })
-#             elif advance_amounts:
-#                 adv_value = float(advance_amounts)
-#                 total_debit += adv_value
-#                 remaining_balance = final_price - adv_value
-
-#                 ledger_entries.append({
-#                     "saleOrderNo": sale_order_no,
-#                     "orderDate": order_date,
-#                     "deliveryDate": delivery_date,
-#                     "description": "Advance Payment",
-#                     "credit": 0.0,
-#                     "debit": round(adv_value, 2),
-#                     "balance": round(remaining_balance, 2)
-#                 })
-
-#         total_balance = total_credit - total_debit
-
-#         ledger_summary = {
-#             "customerNumber": customerNumber,
-#             "customerName": orders[0].get("customerName", ""),
-#             "totalCredit": round(total_credit, 2),
-#             "totalDebit": round(total_debit, 2),
-#             "totalBalance": round(total_balance, 2),
-#             "ledgerEntries": ledger_entries
-#         }
-
-#         return {"status": "success", "data": ledger_summary}
-
-#     except Exception as e:
-#         logger.error(f"Error while generating ledger for {customerNumber}: {e}", exc_info=True)
-#         raise HTTPException(status_code=500, detail="Internal Server Error")
