@@ -4,7 +4,7 @@ import io
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from .utils import get_wholesale_collection, serialize_item
-from .pdf_generator import get_company_details, _build_invoice_pdf, build_ledger_pdf
+from .pdf_generator import _build_invoice_pdf, build_ledger_pdf
 
 async def process_ledger_data(
     company_name: str,

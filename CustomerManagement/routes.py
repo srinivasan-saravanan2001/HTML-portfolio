@@ -18,41 +18,47 @@ async def generate_customer_id():
     collection = get_customer_collection()
     pipeline = [
         {"$match": {"customerId": {"$regex": "^CUST"}}},
-        {"$sort": {"customerId": -1}},
+        {"$sort": {"_id": -1}},          # ← was {"customerId": -1}
         {"$limit": 1},
         {"$project": {"customerId": 1, "_id": 0}}
     ]
     result = await collection.aggregate(pipeline).to_list(length=1)
-    
+
     if not result:
         return "CUST001"
-    
+
     last_id = result[0].get("customerId", "CUST000")
     number = int(last_id.replace("CUST", ""))
-    return f"CUST{number + 1:03d}"
+    next_number = number + 1
+    digits = max(3, len(str(next_number)))
+    return f"CUST{next_number:0{digits}d}"
+
 
 @router.post("/", response_model=Customer)
 async def create_customer(customer: CustomerPost):
     collection = get_customer_collection()
     new_customer = customer.dict()
     customer_id = await generate_customer_id()
-    new_customer["customerId"] = customer_id
+    new_customer["customerId"] = customer_id   # store "CUST001" in DB
     if not new_customer.get("status"):
         new_customer["status"] = "customer"
     try:
         result = await collection.insert_one(new_customer)
     except DuplicateKeyError:
         raise HTTPException(
-            status_code=409, 
+            status_code=409,
             detail="A customer with this phone number already exists."
         )
+    # ← CHANGED: return both id (MongoDB _id) and customerId (CUST001)
     return Customer(
-        customerId=str(result.inserted_id),
+        id=str(result.inserted_id),
+        customerId=customer_id,
         customerName=new_customer.get("customerName", ""),
         customerPhoneNumber=new_customer.get("customerPhoneNumber", ""),
-        status=new_customer.get("status", "customer"), 
+        status=new_customer.get("status", "customer"),
         address=new_customer.get("address", "")
     )
+
 
 @router.get("/")
 async def get_all_customers(
@@ -86,7 +92,8 @@ async def get_all_customers(
                     {"$limit": limit},
                     {"$project": {
                         "_id": 0,
-                        "customerId": {"$toString": "$_id"}, 
+                        "id": {"$toString": "$_id"},           # ← ADD: MongoDB _id
+                        "customerId": "$customerId",            # ← CHANGED: real CUST001
                         "customerName": 1,
                         "customerPhoneNumber": 1,
                         "status": 1,
@@ -98,7 +105,7 @@ async def get_all_customers(
     ]
 
     results = await collection.aggregate(pipeline).to_list(length=1)
-    
+
     if not results:
         return {"data": [], "total": 0, "page": page, "limit": limit, "hasNextPage": False}
 
@@ -122,7 +129,7 @@ async def export_customers_excel(
     status: Optional[str] = Query("active")
 ):
     collection = get_customer_collection()
-    
+
     match_stage = {}
     if status:
         match_stage["status"] = status
@@ -135,7 +142,6 @@ async def export_customers_excel(
             {"address": search_regex}
         ]
 
-    # Project only needed fields
     pipeline = [
         {"$match": match_stage},
         {"$sort": {"_id": -1}},
@@ -147,16 +153,14 @@ async def export_customers_excel(
         }}
     ]
 
-    # Use async cursor iterator for memory efficiency
     cursor = collection.aggregate(pipeline)
-    
+
     wb = Workbook()
     ws = wb.active
     ws.title = "Customers"
 
-    # Styles
-    header_font = Font(bold=True, color="FFFFFF", size=11)
-    header_fill = PatternFill(start_color="4F46E5", end_color="4F46E5", fill_type="solid")
+    header_font = Font(bold=True, color="1E293B", size=11)
+    header_fill = PatternFill(start_color="CCFBF1", end_color="CCFBF1", fill_type="solid")
     center_alignment = Alignment(horizontal="center", vertical="center")
     left_alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
     thin_border = Border(
@@ -181,13 +185,13 @@ async def export_customers_excel(
             cust.get("customerPhoneNumber", ""),
             cust.get("address", "")
         ])
-        
+
         current_row = ws.max_row
         for col_idx, cell in enumerate(ws[current_row]):
             cell.border = thin_border
             cell.alignment = center_alignment if col_idx < 2 else left_alignment
             if idx % 2 == 0:
-                cell.fill = PatternFill(start_color="F9FAFB", end_color="F9FAFB", fill_type="solid")
+                cell.fill = PatternFill(start_color="EEF3F2", end_color="EEF3F2", fill_type="solid")
         idx += 1
 
     ws.column_dimensions['A'].width = 8
@@ -201,22 +205,22 @@ async def export_customers_excel(
     file_stream.seek(0)
 
     return StreamingResponse(
-        file_stream, 
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
+        file_stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={'Content-Disposition': 'attachment; filename="customers_export.xlsx"'}
     )
 
-# --- Optimized Pagination for Inactive (Aggregation) ---
+
 @router.get("/pagination")
 async def get_customers_with_pagination(
     page: int = Query(1, ge=1),
-    limit: int = Query(20, ge=1), # Default to 20
+    limit: int = Query(20, ge=1),
     status: Optional[str] = Query(None),
     customerPhoneNumber: Optional[str] = Query(None)
 ):
     collection = get_customer_collection()
     skip = (page - 1) * limit
-    
+
     match_stage = {}
     if status:
         match_stage["status"] = status
@@ -234,7 +238,8 @@ async def get_customers_with_pagination(
                     {"$limit": limit},
                     {"$project": {
                         "_id": 0,
-                        "customerId": {"$toString": "$_id"},
+                        "id": {"$toString": "$_id"},           # ← ADD: MongoDB _id
+                        "customerId": "$customerId",            # ← CHANGED: real CUST001
                         "customerName": 1,
                         "customerPhoneNumber": 1,
                         "status": 1,
@@ -244,9 +249,9 @@ async def get_customers_with_pagination(
             }
         }
     ]
-    
+
     results = await collection.aggregate(pipeline).to_list(length=1)
-    
+
     if not results:
         return {"data": [], "total": 0, "page": page, "limit": limit, "totalPages": 0}
 
@@ -263,26 +268,29 @@ async def get_customers_with_pagination(
         "data": data
     }
 
+
 @router.get("/by-customer", response_model=List[Customer])
 async def get_customers(customerPhoneNumber: Optional[str] = Query(None)):
     match_stage = {}
     if customerPhoneNumber:
         match_stage["customerPhoneNumber"] = customerPhoneNumber.strip()
-    
+
     pipeline = [
         {"$match": match_stage},
         {"$project": {
             "_id": 0,
-            "customerId": {"$toString": "$_id"},
+            "id": {"$toString": "$_id"},                       # ← ADD: MongoDB _id
+            "customerId": "$customerId",                        # ← CHANGED: real CUST001
             "customerName": 1,
             "customerPhoneNumber": 1,
             "status": 1,
             "address": 1
         }}
     ]
-    
+
     cursor = get_customer_collection().aggregate(pipeline)
     return [Customer(**doc) async for doc in cursor]
+
 
 @router.get("/{customer_id}", response_model=Customer)
 async def get_customer_by_id(customer_id: str):
@@ -295,19 +303,21 @@ async def get_customer_by_id(customer_id: str):
         {"$match": {"_id": oid}},
         {"$project": {
             "_id": 0,
-            "customerId": {"$toString": "$_id"},
+            "id": {"$toString": "$_id"},                       # ← ADD: MongoDB _id
+            "customerId": "$customerId",                        # ← CHANGED: real CUST001
             "customerName": 1,
             "customerPhoneNumber": 1,
             "status": 1,
             "address": 1
         }}
     ]
-    
+
     result = await get_customer_collection().aggregate(pipeline).to_list(length=1)
     if not result:
         raise HTTPException(status_code=404, detail="Customer not found")
-    
+
     return Customer(**result[0])
+
 
 @router.patch("/{customer_id}", response_model=Customer)
 async def update_customer(customer_id: str, customer_patch: CustomerPatch):
@@ -320,31 +330,32 @@ async def update_customer(customer_id: str, customer_patch: CustomerPatch):
         k: v for k, v in customer_patch.dict(exclude_unset=True).items()
         if v is not None
     }
-    
+
     if updated_fields:
         await get_customer_collection().update_one(
             {"_id": oid},
             {"$set": updated_fields}
         )
-            
-    # Return updated doc via aggregation to ensure ID format consistency
+
     pipeline = [
         {"$match": {"_id": oid}},
         {"$project": {
             "_id": 0,
-            "customerId": {"$toString": "$_id"},
+            "id": {"$toString": "$_id"},                       # ← ADD: MongoDB _id
+            "customerId": "$customerId",                        # ← CHANGED: real CUST001
             "customerName": 1,
             "customerPhoneNumber": 1,
             "status": 1,
             "address": 1
         }}
     ]
-    
+
     result = await get_customer_collection().aggregate(pipeline).to_list(length=1)
     if not result:
-         raise HTTPException(status_code=404, detail="Customer not found")
+        raise HTTPException(status_code=404, detail="Customer not found")
 
     return Customer(**result[0])
+
 
 @router.delete("/{customer_id}")
 async def delete_customer(customer_id: str):
@@ -357,22 +368,3 @@ async def delete_customer(customer_id: str):
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Customer not found")
     return {"message": "Customer deleted successfully"}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

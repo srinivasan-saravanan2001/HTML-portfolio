@@ -3,7 +3,7 @@ from typing import Optional, Any, Dict, List, Union
 from motor.motor_asyncio import AsyncIOMotorClient
 
 client = AsyncIOMotorClient("mongodb://localhost:27017/")
-db = client["Corporatecustomers"]
+db = client["salesorder"]
 
 def get_wholesale_collection():
     return db["WholeSale"]
@@ -92,16 +92,22 @@ def round_order_amounts(data: Dict) -> Dict:
 def serialize_item(item: Dict) -> Dict:
     if not item:
         return {}
+    
     rounded = round_order_amounts(item)
+    
     if "_id" in rounded:
         rounded["id"] = str(rounded["_id"])
         del rounded["_id"]
+    if "customerId" in rounded and rounded["customerId"]:
+        rounded["customerId"] = str(rounded["customerId"])
+    else:
+        rounded["customerId"] = None
     datetime_fields = ["createdDate", "deliveryDate", "invoicedDate", "fullyPaidDate"]
     for field in datetime_fields:
         if field in rounded and isinstance(rounded[field], datetime):
             rounded[field] = rounded[field].isoformat()
-    return rounded
 
+    return rounded
 
 def get_financial_year(date=None):
     if date is None:
@@ -120,14 +126,14 @@ def get_financial_year(date=None):
 async def generate_invoice_no(collection):
     now = datetime.now()
     fy = get_financial_year(now)
-    prefix = f"33BM{fy}CP"
+    prefix = f"33{fy}CP"
 
     pipeline = [
-        {"$match": {"invoiceNo": {"$regex": f"^{prefix}\\d{{6}}$"}}},
+        {"$match": {"invoiceNo": {"$regex": f"^33(BM)?{fy}CP\\d{{6}}$"}}},
         {
             "$project": {
                 "numericSuffix": {
-                    "$toInt": {"$substr": ["$invoiceNo", len(prefix), 6]}
+                    "$toInt": {"$substrBytes": ["$invoiceNo", {"$subtract": [{"$strLenBytes": "$invoiceNo"}, 6]}, 6]}
                 }
             }
         },
@@ -147,14 +153,14 @@ async def generate_invoice_no(collection):
 async def generate_order_id(collection):
     now = datetime.now()
     fy = get_financial_year(now)
-    prefix = f"33BM{fy}CPORD"
+    prefix = f"33{fy}CPORD"
 
     pipeline = [
-        {"$match": {"orderId": {"$regex": f"^{prefix}\\d{{6}}$"}}},
+        {"$match": {"orderId": {"$regex": f"^33(BM)?{fy}CPORD\\d{{6}}$"}}},
         {
             "$project": {
                 "numericSuffix": {
-                    "$toInt": {"$substr": ["$orderId", len(prefix), 6]}
+                    "$toInt": {"$substrBytes": ["$orderId", {"$subtract": [{"$strLenBytes": "$orderId"}, 6]}, 6]}
                 }
             }
         },

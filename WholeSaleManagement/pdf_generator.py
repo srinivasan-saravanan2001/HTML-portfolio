@@ -1,5 +1,3 @@
-import urllib.request
-import json
 from io import BytesIO
 from datetime import datetime
 from reportlab.lib import colors
@@ -7,12 +5,12 @@ from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
-from reportlab.platypus import Image as RLImage
 from typing import List, Dict, Any, Optional
 
-colors_primary    = "#b43880"
-colors_secondary  = "#ad3c7a"
-colors_light_bg   = "#f8fafc"
+colors_primary    = "#0f766e"
+colors_header_bg  = "#ccfbf1"
+colors_secondary  = "#0f766e"
+colors_light_bg   = "#eef3f2"
 colors_border     = "#d0d7de"
 colors_text_dark  = "#1e293b"
 colors_text_light = "#64748b"
@@ -21,8 +19,8 @@ colors_warning_bg = "#fff7ed"
 colors_warning_fg = "#c2410c"   
 colors_charge_bg  = "#f0fdf4"  
 colors_charge_fg  = "#166534"   
-colors_remark_bg  = "#eff6ff"   
-colors_remark_fg  = "#1e40af"  
+colors_remark_bg  = "#ccfbf1"
+colors_remark_fg  = "#0b5f59"
 
 
 def get_pdf_styles():
@@ -42,7 +40,7 @@ def get_pdf_styles():
     ))
     styles.add(ParagraphStyle(
         name='OrdTableHeader', parent=styles['Normal'],
-        fontSize=7, textColor=colors.HexColor(colors_white),
+        fontSize=7, textColor=colors.HexColor(colors_text_dark),
         alignment=1, fontName='Helvetica-Bold', leading=9,
     ))
     styles.add(ParagraphStyle(
@@ -113,7 +111,7 @@ def get_pdf_styles():
     ))
     styles.add(ParagraphStyle(
         name='InvTableHeader', parent=styles['Normal'],
-        fontSize=7, textColor=colors.HexColor(colors_white),
+        fontSize=7, textColor=colors.HexColor(colors_text_dark),
         alignment=1, fontName='Helvetica-Bold', leading=9, wordWrap='CJK',
     ))
     styles.add(ParagraphStyle(
@@ -201,27 +199,6 @@ def get_pdf_styles():
 
 
 
-async def get_company_details() -> dict:
-    url = "https://yenerp.com/purchaseapi/pobusiness/"
-    try:
-        with urllib.request.urlopen(url, timeout=5) as response:
-            if response.status == 200:
-                data = json.loads(response.read().decode())
-                if data and len(data) > 0:
-                    company = data[0]
-                    return {
-                        "name":      company.get("companyName", "N/A"),
-                        "address1":  company.get("address1", ""),
-                        "address2":  company.get("address2", ""),
-                        "phone":     company.get("phoneNo", ""),
-                        "gst":       company.get("gstIn", ""),
-                        "logo_url":  company.get("imageUrl", None),
-                    }
-    except Exception as e:
-        print(f"Warning: Failed to fetch company details: {e}")
-    return {"name": "Company", "address1": "", "address2": "", "phone": "", "gst": "", "logo_url": None}
-
-
 def _safe_text(value, default: str = "N/A") -> str:
     return str(value) if value is not None else default
 
@@ -234,19 +211,6 @@ def _fmt_date(date_value) -> str:
         return date_value.strftime("%d-%m-%Y")
     except Exception:
         return str(date_value)
-
-def _load_logo(logo_url: Optional[str], width: int = 50, height: int = 50) -> Optional[RLImage]:
-    """Fetch a remote logo and return an RLImage, or None on failure."""
-    if not logo_url or logo_url.startswith("blob:"):
-        return None
-    try:
-        with urllib.request.urlopen(logo_url, timeout=5) as resp:
-            img = RLImage(BytesIO(resp.read()), width=width, height=height)
-            img.hAlign = "LEFT"
-            return img
-    except Exception as e:
-        print(f"Could not load logo: {e}")
-        return None
 
 def _separator_line(available_width: float) -> Table:
     """Thin primary-colour separator line."""
@@ -318,29 +282,6 @@ def build_order_pdf(
     styles = get_pdf_styles()
     story = []
     available_width = A4[0] - doc.leftMargin - doc.rightMargin
-    ci = company_info or {}
-
-    logo_img = _load_logo(ci.get("logo_url"))
-    full_address = ", ".join(
-        [p for p in [ci.get("address1", "").strip(), ci.get("address2", "").strip()] if p]
-    )
-
-    details_table = Table(
-        [
-            [Paragraph(f"<b>{ci.get('name', 'Company Name')}</b>", styles["CompanyName"])],
-            [Paragraph(full_address, styles["CompanySub"])],
-            [Paragraph(f"GSTIN: {ci.get('gst', 'N/A')} | Phone: {ci.get('phone', 'N/A')}", styles["CompanySub"])],
-        ],
-        colWidths=[available_width - 60],
-    )
-
-    if logo_img:
-        header_table = Table([[logo_img, details_table]], colWidths=[60, available_width - 60])
-    else:
-        header_table = Table([[details_table]], colWidths=[available_width])
-
-    story.append(header_table)
-
     line = Table([[""]], colWidths=[available_width])
     line.setStyle(TableStyle([
         ("LINEABOVE",     (0, 0), (-1, 0), 2, colors.HexColor(colors_primary)),
@@ -445,8 +386,8 @@ def build_order_pdf(
 
     items_table = Table(items_data, colWidths=col_widths, repeatRows=1)
     items_table.setStyle(TableStyle([
-        ("BACKGROUND",    (0, 0), (-1, 0),  colors.HexColor(colors_primary)),
-        ("TEXTCOLOR",     (0, 0), (-1, 0),  colors.HexColor(colors_white)),
+        ("BACKGROUND",    (0, 0), (-1, 0),  colors.HexColor(colors_header_bg)),
+        ("TEXTCOLOR",     (0, 0), (-1, 0),  colors.HexColor(colors_text_dark)),
         ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
         ("FONTSIZE",      (0, 0), (-1, 0),  7),
         ("ALIGN",         (0, 0), (-1, 0),  "CENTER"),
@@ -454,7 +395,7 @@ def build_order_pdf(
         ("GRID",          (0, 0), (-1, -1), 0.5, colors.HexColor(colors_border)),
         ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
         ("FONTSIZE",      (0, 1), (-1, -1), 7),
-        ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.HexColor(colors_white), colors.HexColor("#fafafa")]),
+        ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.HexColor(colors_white), colors.HexColor("#eef3f2")]),
         ("TOPPADDING",    (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ("ALIGN",         (0, 1), (0, -1),  "CENTER"),
@@ -551,27 +492,6 @@ def _build_invoice_pdf(
     styles = get_pdf_styles()
     story  = []
     available_width = A4[0] - doc.leftMargin - doc.rightMargin
-    ci = company_info or {}
-    logo_img = _load_logo(ci.get("logo_url"))
-    full_address = ", ".join(
-        [p for p in [ci.get("address1", "").strip(), ci.get("address2", "").strip()] if p]
-    )
-
-    details_table = Table(
-        [
-            [Paragraph(f"<b>{ci.get('name', 'Company Name')}</b>", styles["CompanyName"])],
-            [Paragraph(full_address, styles["CompanySub"])],
-            [Paragraph(f"GSTIN: {ci.get('gst', 'N/A')} | Phone: {ci.get('phone', 'N/A')}", styles["CompanySub"])],
-        ],
-        colWidths=[available_width - 60],
-    )
-
-    if logo_img:
-        header_table = Table([[logo_img, details_table]], colWidths=[60, available_width - 60])
-    else:
-        header_table = Table([[details_table]], colWidths=[available_width])
-
-    story.append(header_table)
     line = Table([[""]], colWidths=[available_width])
     line.setStyle(TableStyle([
         ("LINEABOVE",     (0, 0), (-1, 0), 2, colors.HexColor(colors_primary)),
@@ -711,8 +631,8 @@ def _build_invoice_pdf(
             items_data.append([EMPTY] * 10)
 
     base_style = [
-        ("BACKGROUND",    (0, 0), (-1, 0),  colors.HexColor(colors_primary)),
-        ("TEXTCOLOR",     (0, 0), (-1, 0),  colors.HexColor(colors_white)),
+        ("BACKGROUND",    (0, 0), (-1, 0),  colors.HexColor(colors_header_bg)),
+        ("TEXTCOLOR",     (0, 0), (-1, 0),  colors.HexColor(colors_text_dark)),
         ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
         ("FONTSIZE",      (0, 0), (-1, 0),  7),
         ("ALIGN",         (0, 0), (-1, 0),  "CENTER"),
@@ -720,7 +640,7 @@ def _build_invoice_pdf(
         ("GRID",          (0, 0), (-1, -1), 0.5, colors.HexColor(colors_border)),
         ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
         ("FONTSIZE",      (0, 1), (-1, -1), 7),
-        ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.HexColor(colors_white), colors.HexColor("#fafafa")]),
+        ("ROWBACKGROUNDS",(0, 1), (-1, -1), [colors.HexColor(colors_white), colors.HexColor("#eef3f2")]),
         ("TOPPADDING",    (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]
@@ -831,28 +751,6 @@ def build_ledger_pdf(
     story  = []
     available_width = A4[0] - doc.leftMargin - doc.rightMargin
     primary_color   = colors.HexColor(colors_primary)
-    ci = company_info or {}
-
-    logo_img    = _load_logo(ci.get("logo_url"))
-    full_address = ", ".join(
-        [p for p in [ci.get("address1", "").strip(), ci.get("address2", "").strip()] if p]
-    )
-
-    details_table = Table(
-        [
-            [Paragraph(f"<b>{ci.get('name', 'Company Name')}</b>", styles["CompanyName"])],
-            [Paragraph(full_address, styles["CompanySub"])],
-            [Paragraph(f"GSTIN: {ci.get('gst', 'N/A')} | Phone: {ci.get('phone', 'N/A')}", styles["CompanySub"])],
-        ],
-        colWidths=[available_width - 60],
-    )
-
-    if logo_img:
-        header_table = Table([[logo_img, details_table]], colWidths=[60, available_width - 60])
-    else:
-        header_table = Table([[details_table]], colWidths=[available_width])
-
-    story.append(header_table)
     story.append(Spacer(1, 15))
     story.append(Paragraph(
         "LEDGER STATEMENT",
@@ -865,7 +763,7 @@ def build_ledger_pdf(
 
     header_style = ParagraphStyle(
         name="TableHeader", parent=styles["Normal"],
-        fontSize=8, textColor=colors.white,
+        fontSize=8, textColor=colors.HexColor(colors_text_dark),
         alignment=1, fontName="Helvetica-Bold",
     )
     table_data = [[
@@ -909,8 +807,8 @@ def build_ledger_pdf(
         repeatRows=1,
     )
     ledger_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0),  (-1, 0),  primary_color),
-        ("TEXTCOLOR",  (0, 0),  (-1, 0),  colors.white),
+        ("BACKGROUND", (0, 0),  (-1, 0),  colors.HexColor(colors_header_bg)),
+        ("TEXTCOLOR",  (0, 0),  (-1, 0),  colors.HexColor(colors_text_dark)),
         ("ALIGN",      (0, 0),  (-1, 0),  "CENTER"),
         ("FONTNAME",   (0, 0),  (-1, 0),  "Helvetica-Bold"),
         ("FONTSIZE",   (0, 0),  (-1, -1), 8),

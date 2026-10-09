@@ -7,8 +7,8 @@ from .models import UserInDB
 from fastapi import HTTPException, status
 from typing import Optional
 
-client = MongoClient("mongodb://admin:YenE580nOOUE6cDhQERP@194.233.78.90:27017/admin?appName=mongosh+2.1.1&authSource=admin&authMechanism=SCRAM-SHA-256&replicaSet=yenerp-cluster")
-db = client["eventregistration"] 
+client = MongoClient("mongodb://localhost:27017/")
+db = client["salesorder"] 
 users_collection = db['adminlogin']  
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
