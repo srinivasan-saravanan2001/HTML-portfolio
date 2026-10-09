@@ -1,5 +1,12 @@
 fastapi
 uvicorn[standard]
-pymongo[srv]
+pymongo
+motor
 python-dotenv
 passlib
+bcrypt
+python-jose[cryptography]
+openpyxl
+pandas
+reportlab
+xlsxwriter
