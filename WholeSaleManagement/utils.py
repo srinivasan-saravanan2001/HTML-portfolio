@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Optional, Any, Dict, List, Union
 from motor.motor_asyncio import AsyncIOMotorClient
 
-client = AsyncIOMotorClient("mongodb://localhost:27017/")
+client = AsyncIOMotorClient("mongodb+srv://srini462001:srini654693@cluster0.60oy4.mongodb.net/?appName=Cluster0")
 db = client["salesorder"]
 
 def get_wholesale_collection():

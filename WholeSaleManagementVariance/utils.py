@@ -1,6 +1,6 @@
 from motor.motor_asyncio import AsyncIOMotorClient
 
-MONGO_URL = "mongodb://localhost:27017/"
+MONGO_URL = "mongodb+srv://srini462001:srini654693@cluster0.60oy4.mongodb.net/?appName=Cluster0"
 DATABASE_NAME = "salesorder"
 
 COLLECTION_ITEM_MASTER = "ItemMaster"

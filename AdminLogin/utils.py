@@ -7,7 +7,7 @@ from .models import UserInDB
 from fastapi import HTTPException, status
 from typing import Optional
 
-client = MongoClient("mongodb://localhost:27017/")
+client = MongoClient("mongodb+srv://srini462001:srini654693@cluster0.60oy4.mongodb.net/?appName=Cluster0")
 db = client["salesorder"] 
 users_collection = db['adminlogin']  
 
